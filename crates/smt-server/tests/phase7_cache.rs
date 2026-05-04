@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use smt_server::{dispatch_payload_with_cache, Backend, QueryResult, ResponseCache};
+use smt_server::{dispatch_payload_with_cache, Backend, PooledBackend, QueryResult, ResponseCache};
 use smt_wire::{BinaryRequest, BinaryResponse, ExprBuilder};
 
 struct CountingBackend {
@@ -66,4 +66,33 @@ fn cache_key_keeps_fields_that_affect_payload() {
 
     assert_eq!(count.load(Ordering::SeqCst), 2);
     assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn pooled_backend_routes_similar_queries_to_same_backend_instance() {
+    let c0 = Arc::new(AtomicUsize::new(0));
+    let c1 = Arc::new(AtomicUsize::new(0));
+    let pool = PooledBackend::new(vec![
+        Arc::new(CountingBackend {
+            count: Arc::clone(&c0),
+        }),
+        Arc::new(CountingBackend {
+            count: Arc::clone(&c1),
+        }),
+    ]);
+
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let req1 =
+        BinaryRequest::parse(&builder.build_solve_request(1, 0, false, false).unwrap()).unwrap();
+    let req2 =
+        BinaryRequest::parse(&builder.build_solve_request(2, 0, false, false).unwrap()).unwrap();
+
+    let route1 = pool.route_index(&req1).unwrap();
+    let route2 = pool.route_index(&req2).unwrap();
+    assert_eq!(route1, route2);
+    pool.handle(&req1).unwrap();
+    pool.handle(&req2).unwrap();
+    assert!(c0.load(Ordering::SeqCst) == 2 || c1.load(Ordering::SeqCst) == 2);
 }

@@ -8,6 +8,7 @@
 pub mod backend;
 pub mod cache;
 pub mod eval;
+pub mod pool;
 pub mod protocol;
 pub mod racing;
 pub mod server;
@@ -18,6 +19,7 @@ pub mod z3cli;
 pub use backend::{Backend, QueryResult, QueryStatus};
 pub use cache::{cache_key_for_payload, rebind_cached_response, CacheStats, ResponseCache};
 pub use eval::ExhaustiveBackend;
+pub use pool::PooledBackend;
 pub use protocol::{handle_binary_frame, handle_binary_request, response_from_query_result};
 pub use racing::RacingBackend;
 pub use server::{dispatch_payload, dispatch_payload_with_cache, serve_tcp, ServerConfig};

@@ -18,3 +18,5 @@ The repository now includes two practical backends:
 2. `Z3CliBackend`: translates validated wire IR to SMT-LIB and invokes a `z3` executable when one is available.
 
 `RacingBackend` can race these (or future binbit/Bitwuzla adapters) and returns the first conclusive result while preserving `UNKNOWN` fallback behavior.
+
+`PooledBackend` provides the phase-7 warm-start hook: it routes structurally similar stateless requests to the same backend instance so future native solvers can retain useful internal state without changing the protocol.
