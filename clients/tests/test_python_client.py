@@ -31,6 +31,9 @@ def test_python_client_validates_width_and_sort():
     a = b.bv_var("a", 8)
     c = b.bv_var("c", 16)
     p = b.bool_var("p")
+    rotated = b.bv_rotate_left(a, 3)
+    assert smt.is_bv_ref(rotated)
+    assert b.build_minimize_request(3, a, signed=True, want_model=True).startswith(b"SMTQ")
     try:
         b.bv_add(a, c)
         raise AssertionError("expected width error")

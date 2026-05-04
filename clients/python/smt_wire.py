@@ -342,6 +342,20 @@ class Builder:
     def bool_ite(self, c: int, t: int, e: int) -> int:
         return self.bool_or(self.bool_and(c, t), self.bool_and(self.bool_not(c), e))
 
+    def bv_rotate_left(self, x: int, amount: int) -> int:
+        width = self._expect_bv(x)
+        amount %= width
+        if amount == 0:
+            return x
+        return self.bv_or(self.bv_shl(x, self.bv_const(amount, width)), self.bv_lshr(x, self.bv_const(width - amount, width)))
+
+    def bv_rotate_right(self, x: int, amount: int) -> int:
+        width = self._expect_bv(x)
+        amount %= width
+        if amount == 0:
+            return x
+        return self.bv_or(self.bv_lshr(x, self.bv_const(amount, width)), self.bv_shl(x, self.bv_const(width - amount, width)))
+
     def assert_(self, root: int) -> None:
         self._expect_bool(root)
         self.assertions.append((root, None))

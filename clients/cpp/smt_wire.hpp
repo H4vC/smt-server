@@ -44,6 +44,7 @@ inline void u64(std::vector<uint8_t>& out, uint64_t v) { for (int i = 0; i < 8; 
 struct Node { uint8_t tag, arity; uint16_t aux_hi; uint32_t width, aux_lo, children; uint64_t payload; };
 struct Assertion { uint32_t root; bool named; uint32_t name_offset, name_len; };
 struct Meta { bool is_bool; uint32_t width; };
+struct Response { uint32_t request_id; uint8_t status, flags; std::vector<uint8_t> payload; };
 
 class Builder {
 public:
@@ -97,6 +98,7 @@ public:
     uint32_t bv_zext(uint32_t x, uint16_t amount) { return bv_ext(tag::BV_ZEXT, x, amount); }
     uint32_t bv_sext(uint32_t x, uint16_t amount) { return bv_ext(tag::BV_SEXT, x, amount); }
     uint32_t bv_ite(uint32_t c, uint32_t t, uint32_t e) { expect_bool(c); return add(tag::BV_ITE, same_bv(t, e), {c, t, e}); }
+    uint32_t bv_select(const std::vector<uint32_t>& selectors, const std::vector<uint32_t>& values, uint32_t def) { if (selectors.size() != values.size() || selectors.size() > 127) throw std::invalid_argument("bad BV_SELECT pair count"); uint32_t w = expect_bv(def); std::vector<uint32_t> ch; for (size_t i = 0; i < selectors.size(); ++i) { expect_bool(selectors[i]); if (expect_bv(values[i]) != w) throw std::invalid_argument("BV_SELECT width mismatch"); ch.push_back(selectors[i]); ch.push_back(values[i]); } ch.push_back(def); return add(tag::BV_SELECT, w, ch, uint16_t(selectors.size())); }
 
     uint32_t bool_not(uint32_t x) { expect_bool(x); return add(tag::BOOL_NOT, 0, {x}); }
     uint32_t bool_and(uint32_t a, uint32_t b) { return bool_binary(tag::BOOL_AND, a, b); }
@@ -113,15 +115,31 @@ public:
     uint32_t bv_uge(uint32_t a, uint32_t b) { return bv_ule(b, a); }
     uint32_t bv_sgt(uint32_t a, uint32_t b) { return bv_slt(b, a); }
     uint32_t bv_sge(uint32_t a, uint32_t b) { return bv_sle(b, a); }
+    uint32_t uadd_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::UADD_OVF, a, b); }
+    uint32_t sadd_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::SADD_OVF, a, b); }
+    uint32_t usub_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::USUB_OVF, a, b); }
+    uint32_t ssub_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::SSUB_OVF, a, b); }
+    uint32_t umul_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::UMUL_OVF, a, b); }
+    uint32_t smul_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::SMUL_OVF, a, b); }
+    uint32_t neg_ovf(uint32_t x) { expect_bv(x); return add(tag::NEG_OVF, 0, {x}); }
+    uint32_t sdiv_ovf(uint32_t a, uint32_t b) { return bv_cmp(tag::SDIV_OVF, a, b); }
     uint32_t bool_eq(uint32_t a, uint32_t b) { expect_bool(a); expect_bool(b); return bool_and(bool_or(a, bool_not(b)), bool_or(bool_not(a), b)); }
     uint32_t bool_xor(uint32_t a, uint32_t b) { return bool_not(bool_eq(a, b)); }
+    uint32_t bool_ite(uint32_t c, uint32_t t, uint32_t e) { expect_bool(c); expect_bool(t); expect_bool(e); return bool_or(bool_and(c, t), bool_and(bool_not(c), e)); }
+    uint32_t bv_rotate_left(uint32_t x, uint64_t amount) { uint32_t w = expect_bv(x); amount %= w; if (amount == 0) return x; return bv_or(bv_shl(x, bv_const(amount, w)), bv_lshr(x, bv_const(uint64_t(w) - amount, w))); }
+    uint32_t bv_rotate_right(uint32_t x, uint64_t amount) { uint32_t w = expect_bv(x); amount %= w; if (amount == 0) return x; return bv_or(bv_lshr(x, bv_const(amount, w)), bv_shl(x, bv_const(uint64_t(w) - amount, w))); }
 
     void assert_(uint32_t root) { expect_bool(root); assertions.push_back({root, false, 0, 0}); }
     void assert_named(const std::string& name, uint32_t root) { expect_bool(root); auto b = add_blob(name); assertions.push_back({root, true, b.first, b.second}); }
     void assume(uint32_t root) { expect_bool(root); assumptions.push_back(root); }
+    void clear_assumptions() { assumptions.clear(); }
+    void assert_mutex(const std::vector<uint32_t>& sels) { for (auto s: sels) expect_bool(s); for (size_t i = 0; i < sels.size(); ++i) for (size_t j = i + 1; j < sels.size(); ++j) assert_(bool_not(bool_and(sels[i], sels[j]))); }
 
     std::vector<uint8_t> to_bytes() const { return expr_bytes(nodes, children, blob); }
     std::vector<uint8_t> build_solve_request(uint32_t request_id, uint32_t budget_ms = 0, bool want_model = false, bool want_core = false) const { return build_request(request_id, command::SOLVE, (want_model ? request_flags::WANT_MODEL : 0) | (want_core ? request_flags::WANT_CORE : 0), budget_ms, 0, false); }
+    std::vector<uint8_t> build_simplify_request(uint32_t request_id) const { return build_request(request_id, command::SIMPLIFY, 0, 0, 0, false); }
+    std::vector<uint8_t> build_minimize_request(uint32_t request_id, uint32_t target, bool signed_order = false, uint32_t budget_ms = 0, bool want_model = false) const { expect_bv(target); return build_request(request_id, command::MINIMIZE, (signed_order ? request_flags::SIGNED : 0) | (want_model ? request_flags::WANT_MODEL : 0), budget_ms, target, true); }
+    std::vector<uint8_t> build_maximize_request(uint32_t request_id, uint32_t target, bool signed_order = false, uint32_t budget_ms = 0, bool want_model = false) const { expect_bv(target); return build_request(request_id, command::MAXIMIZE, (signed_order ? request_flags::SIGNED : 0) | (want_model ? request_flags::WANT_MODEL : 0), budget_ms, target, true); }
 
 private:
     static void check_width(uint32_t w) { if (w == 0 || w > MAX_WIDTH) throw std::invalid_argument("invalid BV width"); }
@@ -140,9 +158,14 @@ private:
     uint32_t bv_cmp(uint8_t t, uint32_t a, uint32_t b) { same_bv(a,b); return add(t, 0, {a,b}); }
 
     static std::vector<uint8_t> expr_bytes(const std::vector<Node>& ns, const std::vector<uint32_t>& cs, const std::vector<uint8_t>& bl) { std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T',0,1,0,0,0}); u32(out, uint32_t(ns.size())); u32(out, uint32_t(cs.size())); u32(out, uint32_t(bl.size())); for (int i=0;i<12;++i) u8(out,0); for (const auto& n: ns) { u8(out,n.tag); u8(out,n.arity); u16(out,n.aux_hi); u32(out,n.width); u32(out,n.aux_lo); u32(out,n.children); u64(out,n.payload); } for (auto c: cs) u32(out,c); out.insert(out.end(), bl.begin(), bl.end()); return out; }
-    std::vector<uint8_t> build_request(uint32_t request_id, uint8_t cmd, uint8_t flags, uint32_t budget, uint32_t target, bool has_target) const { auto expr = to_bytes(); std::vector<Assertion> named, unnamed; for (auto a: assertions) (a.named ? named : unnamed).push_back(a); std::vector<Assertion> ordered = named; ordered.insert(ordered.end(), unnamed.begin(), unnamed.end()); std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T','Q'}); u32(out, request_id); u8(out, cmd); u8(out, flags); u32(out, budget); u32(out, uint32_t(expr.size())); u16(out, uint16_t(ordered.size())); u16(out, uint16_t(named.size())); u16(out, uint16_t(assumptions.size())); u32(out, has_target ? target : 0); u32(out, 0); out.insert(out.end(), expr.begin(), expr.end()); for (auto a: ordered) u32(out, a.root); for (auto a: named) { u32(out, a.name_offset); u32(out, a.name_len); } for (auto a: assumptions) u32(out, a); return out; }
+    void mark(uint32_t ref, std::vector<uint8_t>& live) const { uint32_t idx = ref_index(ref); if (idx >= nodes.size()) throw std::invalid_argument("bad root ref"); if (live[idx]) return; live[idx] = 1; const Node& n = nodes[idx]; for (uint32_t i = 0; i < n.arity; ++i) mark(children[n.children + i], live); }
+    std::vector<uint8_t> compact_expr(const std::vector<uint32_t>& roots, std::vector<uint32_t>& old_to_new) const { std::vector<uint8_t> live(nodes.size(), 0); for (auto r: roots) mark(r, live); old_to_new.assign(nodes.size(), UINT32_MAX); uint32_t next = 0; for (size_t old = 0; old < nodes.size(); ++old) if (live[old]) old_to_new[old] = meta[old].is_bool ? bool_ref(next++) : bv_ref(next++); std::vector<Node> ns; std::vector<uint32_t> cs; for (size_t old = 0; old < nodes.size(); ++old) if (live[old]) { Node n = nodes[old]; uint32_t start = n.arity ? uint32_t(cs.size()) : 0; for (uint32_t i = 0; i < n.arity; ++i) cs.push_back(old_to_new[ref_index(children[n.children + i])]); n.children = start; ns.push_back(n); } return expr_bytes(ns, cs, blob); }
+    uint32_t remap(uint32_t ref, const std::vector<uint32_t>& old_to_new) const { uint32_t idx = ref_index(ref); if (idx >= old_to_new.size() || old_to_new[idx] == UINT32_MAX) throw std::invalid_argument("dead node ref"); return old_to_new[idx]; }
+    std::vector<uint8_t> build_request(uint32_t request_id, uint8_t cmd, uint8_t flags, uint32_t budget, uint32_t target, bool has_target) const { std::vector<Assertion> named, unnamed; for (auto a: assertions) (a.named ? named : unnamed).push_back(a); std::vector<Assertion> ordered = named; ordered.insert(ordered.end(), unnamed.begin(), unnamed.end()); std::vector<uint32_t> roots; for (auto a: ordered) roots.push_back(a.root); roots.insert(roots.end(), assumptions.begin(), assumptions.end()); if (has_target) roots.push_back(target); std::vector<uint32_t> old_to_new; auto expr = compact_expr(roots, old_to_new); std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T','Q'}); u32(out, request_id); u8(out, cmd); u8(out, flags); u32(out, budget); u32(out, uint32_t(expr.size())); u16(out, uint16_t(ordered.size())); u16(out, uint16_t(named.size())); u16(out, uint16_t(assumptions.size())); u32(out, has_target ? remap(target, old_to_new) : 0); u32(out, 0); out.insert(out.end(), expr.begin(), expr.end()); for (auto a: ordered) u32(out, remap(a.root, old_to_new)); for (auto a: named) { u32(out, a.name_offset); u32(out, a.name_len); } for (auto a: assumptions) u32(out, remap(a, old_to_new)); return out; }
 };
 
 inline std::vector<uint8_t> frame(const std::vector<uint8_t>& payload) { std::vector<uint8_t> out; u32(out, uint32_t(payload.size())); out.insert(out.end(), payload.begin(), payload.end()); return out; }
+inline uint32_t read_u32(const std::vector<uint8_t>& data, size_t off) { if (off + 4 > data.size()) throw std::invalid_argument("short u32"); return uint32_t(data[off]) | (uint32_t(data[off+1]) << 8) | (uint32_t(data[off+2]) << 16) | (uint32_t(data[off+3]) << 24); }
+inline Response parse_response(const std::vector<uint8_t>& data) { if (data.size() < 16 || data[0] != 'S' || data[1] != 'M' || data[2] != 'T' || data[3] != 'R') throw std::invalid_argument("bad response"); uint32_t len = read_u32(data, 10); if (data.size() != 16u + len) throw std::invalid_argument("response length mismatch"); return {read_u32(data, 4), data[8], data[9], std::vector<uint8_t>(data.begin() + 16, data.end())}; }
 
 } // namespace smt_wire
