@@ -6,8 +6,9 @@ performs eager sort/width validation during construction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import socket
 import struct
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Union
 
 EXPR_MAGIC = b"SMT\0"
 REQUEST_MAGIC = b"SMTQ"
@@ -609,3 +610,53 @@ def parse_optimization(payload: bytes, has_model: bool = False) -> OptimizationR
 
 def frame(payload: bytes) -> bytes:
     return struct.pack("<I", len(payload)) + payload
+
+
+def recv_exact(sock: socket.socket, length: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise EOFError("socket closed while reading frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+class TcpClient:
+    """Blocking TCP client for the SMT server transport."""
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 9123,
+        timeout: Optional[float] = None,
+        sock: Optional[socket.socket] = None,
+    ) -> None:
+        self._sock = sock if sock is not None else socket.create_connection((host, port), timeout=timeout)
+
+    @classmethod
+    def from_socket(cls, sock: socket.socket) -> "TcpClient":
+        return cls(sock=sock)
+
+    def close(self) -> None:
+        self._sock.close()
+
+    def __enter__(self) -> "TcpClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def send_payload(self, payload: bytes) -> bytes:
+        self._sock.sendall(frame(payload))
+        (length,) = struct.unpack("<I", recv_exact(self._sock, 4))
+        return recv_exact(self._sock, length)
+
+    def send_request(self, request: bytes) -> Response:
+        return parse_response(self.send_payload(request))
+
+    def send_text(self, script: Union[str, bytes]) -> str:
+        payload = script.encode("utf-8") if isinstance(script, str) else script
+        return self.send_payload(payload).decode("utf-8")

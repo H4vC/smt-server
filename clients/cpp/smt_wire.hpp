@@ -2,11 +2,36 @@
 // Single-file C++17 builder for the SMT v1 wire format.
 // No networking and no dependencies beyond the C++ standard library.
 
+#include <climits>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "Ws2_32.lib")
+#endif
+#else
+#include <cerrno>
+#include <cstring>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+#ifdef ERROR
+#undef ERROR
+#endif
 
 namespace smt_wire {
 
@@ -175,7 +200,7 @@ private:
     std::vector<uint8_t> build_request(uint32_t request_id, uint8_t cmd, uint8_t flags, uint32_t budget, uint32_t target, bool has_target) const { std::vector<Assertion> named, unnamed; for (auto a: assertions) (a.named ? named : unnamed).push_back(a); std::vector<Assertion> ordered = named; ordered.insert(ordered.end(), unnamed.begin(), unnamed.end()); std::vector<uint32_t> roots; for (auto a: ordered) roots.push_back(a.root); roots.insert(roots.end(), assumptions.begin(), assumptions.end()); if (has_target) roots.push_back(target); std::vector<uint32_t> old_to_new; auto expr = compact_expr(roots, old_to_new); std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T','Q'}); u32(out, request_id); u8(out, cmd); u8(out, flags); u32(out, budget); u32(out, uint32_t(expr.size())); u16(out, uint16_t(ordered.size())); u16(out, uint16_t(named.size())); u16(out, uint16_t(assumptions.size())); u32(out, has_target ? remap(target, old_to_new) : 0); u32(out, 0); out.insert(out.end(), expr.begin(), expr.end()); for (auto a: ordered) u32(out, remap(a.root, old_to_new)); for (auto a: named) { u32(out, a.name_offset); u32(out, a.name_len); } for (auto a: assumptions) u32(out, remap(a, old_to_new)); return out; }
 };
 
-inline std::vector<uint8_t> frame(const std::vector<uint8_t>& payload) { std::vector<uint8_t> out; u32(out, uint32_t(payload.size())); out.insert(out.end(), payload.begin(), payload.end()); return out; }
+inline std::vector<uint8_t> frame(const std::vector<uint8_t>& payload) { if (payload.size() > UINT32_MAX) throw std::invalid_argument("frame payload too large"); std::vector<uint8_t> out; u32(out, uint32_t(payload.size())); out.insert(out.end(), payload.begin(), payload.end()); return out; }
 inline uint16_t read_u16(const std::vector<uint8_t>& data, size_t off) { if (off + 2 > data.size()) throw std::invalid_argument("short u16"); return uint16_t(data[off]) | (uint16_t(data[off+1]) << 8); }
 inline uint32_t read_u32(const std::vector<uint8_t>& data, size_t off) { if (off + 4 > data.size()) throw std::invalid_argument("short u32"); return uint32_t(data[off]) | (uint32_t(data[off+1]) << 8) | (uint32_t(data[off+2]) << 16) | (uint32_t(data[off+3]) << 24); }
 inline void require_bytes(const std::vector<uint8_t>& data, size_t off, size_t len, const char* what) { if (off > data.size() || len > data.size() - off) throw std::invalid_argument(what); }
@@ -185,5 +210,130 @@ inline std::vector<std::string> parse_core_payload(const std::vector<uint8_t>& p
 inline SimplifyResult parse_simplify_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 12, "short simplify"); uint32_t expr_len = read_u32(payload, 0); uint16_t assertion_count = read_u16(payload, 4); uint16_t named_count = read_u16(payload, 6); uint16_t assumption_count = read_u16(payload, 8); if (named_count > assertion_count) throw std::invalid_argument("bad simplify named_count"); size_t off = 12; require_bytes(payload, off, expr_len, "short simplify expression"); SimplifyResult result; result.expression.assign(payload.begin() + off, payload.begin() + off + expr_len); off += expr_len; for (uint16_t i = 0; i < assertion_count; ++i) { result.assertion_roots.push_back(read_u32(payload, off)); off += 4; } for (uint16_t i = 0; i < named_count; ++i) { uint32_t name_off = read_u32(payload, off); uint32_t name_len = read_u32(payload, off + 4); off += 8; result.named_assertion_refs.push_back({name_off, name_len}); } for (uint16_t i = 0; i < assumption_count; ++i) { result.assumption_roots.push_back(read_u32(payload, off)); off += 4; } if (off != payload.size()) throw std::invalid_argument("trailing simplify bytes"); return result; }
 inline OptimizationResult parse_optimization_payload(const std::vector<uint8_t>& payload, bool has_model) { size_t off = 0; OptimizationResult result{parse_scalar_value(payload, off), has_model, {}}; if (has_model) { std::vector<uint8_t> rest(payload.begin() + off, payload.end()); result.model = parse_model_payload(rest); off = payload.size(); } if (off != payload.size()) throw std::invalid_argument("trailing optimization bytes"); return result; }
 inline Response parse_response(const std::vector<uint8_t>& data) { if (data.size() < 16 || data[0] != 'S' || data[1] != 'M' || data[2] != 'T' || data[3] != 'R') throw std::invalid_argument("bad response"); uint32_t len = read_u32(data, 10); if (data.size() != 16u + len) throw std::invalid_argument("response length mismatch"); return {read_u32(data, 4), data[8], data[9], std::vector<uint8_t>(data.begin() + 16, data.end())}; }
+
+namespace detail {
+#ifdef _WIN32
+using socket_handle = SOCKET;
+constexpr socket_handle invalid_socket = INVALID_SOCKET;
+inline void ensure_socket_runtime() { struct Wsa { Wsa() { WSADATA data; if (WSAStartup(MAKEWORD(2, 2), &data) != 0) throw std::runtime_error("WSAStartup failed"); } ~Wsa() { WSACleanup(); } }; static Wsa wsa; (void)wsa; }
+inline void close_socket(socket_handle s) { if (s != invalid_socket) closesocket(s); }
+inline int last_socket_error() { return WSAGetLastError(); }
+inline std::string socket_error_text(int code) { return "socket error " + std::to_string(code); }
+inline std::string gai_error_text(int code) { return gai_strerrorA(code); }
+#else
+using socket_handle = int;
+constexpr socket_handle invalid_socket = -1;
+inline void ensure_socket_runtime() {}
+inline void close_socket(socket_handle s) { if (s != invalid_socket) ::close(s); }
+inline int last_socket_error() { return errno; }
+inline std::string socket_error_text(int code) { return std::strerror(code); }
+inline std::string gai_error_text(int code) { return gai_strerror(code); }
+#endif
+inline void throw_socket_error(const char* action) { throw std::runtime_error(std::string(action) + ": " + socket_error_text(last_socket_error())); }
+} // namespace detail
+
+class TcpClient {
+public:
+    TcpClient() = default;
+    TcpClient(const std::string& host, uint16_t port) { open(host, port); }
+    ~TcpClient() { close(); }
+    TcpClient(const TcpClient&) = delete;
+    TcpClient& operator=(const TcpClient&) = delete;
+    TcpClient(TcpClient&& other) noexcept : sock_(other.sock_) { other.sock_ = detail::invalid_socket; }
+    TcpClient& operator=(TcpClient&& other) noexcept { if (this != &other) { close(); sock_ = other.sock_; other.sock_ = detail::invalid_socket; } return *this; }
+
+    static TcpClient connect(const std::string& host, uint16_t port) { return TcpClient(host, port); }
+    bool connected() const { return sock_ != detail::invalid_socket; }
+
+    void open(const std::string& host, uint16_t port) {
+        close();
+        detail::ensure_socket_runtime();
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        addrinfo* result = nullptr;
+        const std::string service = std::to_string(port);
+        int rc = getaddrinfo(host.c_str(), service.c_str(), &hints, &result);
+        if (rc != 0) throw std::runtime_error("getaddrinfo failed: " + detail::gai_error_text(rc));
+        for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
+            detail::socket_handle s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (s == detail::invalid_socket) continue;
+#ifndef _WIN32
+#ifdef SO_NOSIGPIPE
+            int no_sigpipe = 1;
+            (void)setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
+#endif
+#ifdef _WIN32
+            const int addr_len = static_cast<int>(ai->ai_addrlen);
+#else
+            const socklen_t addr_len = static_cast<socklen_t>(ai->ai_addrlen);
+#endif
+            if (::connect(s, ai->ai_addr, addr_len) == 0) { sock_ = s; break; }
+            detail::close_socket(s);
+        }
+        freeaddrinfo(result);
+        if (!connected()) throw std::runtime_error("connect failed");
+    }
+
+    void close() { detail::close_socket(sock_); sock_ = detail::invalid_socket; }
+
+    void send_all(const uint8_t* data, size_t len) {
+        require_connected();
+        while (len > 0) {
+#ifdef _WIN32
+            int chunk = len > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len);
+            int sent = ::send(sock_, reinterpret_cast<const char*>(data), chunk, 0);
+#else
+            int flags = 0;
+#ifdef MSG_NOSIGNAL
+            flags = MSG_NOSIGNAL;
+#endif
+            ssize_t sent = ::send(sock_, data, len, flags);
+#endif
+            if (sent <= 0) detail::throw_socket_error("send");
+            data += static_cast<size_t>(sent);
+            len -= static_cast<size_t>(sent);
+        }
+    }
+
+    std::vector<uint8_t> recv_exact(size_t len) {
+        require_connected();
+        std::vector<uint8_t> out(len);
+        size_t off = 0;
+        while (off < len) {
+#ifdef _WIN32
+            int chunk = (len - off) > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len - off);
+            int got = ::recv(sock_, reinterpret_cast<char*>(out.data() + off), chunk, 0);
+#else
+            ssize_t got = ::recv(sock_, out.data() + off, len - off, 0);
+#endif
+            if (got == 0) throw std::runtime_error("connection closed while reading frame");
+            if (got < 0) detail::throw_socket_error("recv");
+            off += static_cast<size_t>(got);
+        }
+        return out;
+    }
+
+    std::vector<uint8_t> send_payload(const std::vector<uint8_t>& payload) {
+        auto framed = frame(payload);
+        send_all(framed.data(), framed.size());
+        auto header = recv_exact(4);
+        return recv_exact(read_u32(header, 0));
+    }
+
+    Response send_request(const std::vector<uint8_t>& request) { return parse_response(send_payload(request)); }
+
+    std::string send_text(const std::string& script) {
+        std::vector<uint8_t> payload(script.begin(), script.end());
+        auto response = send_payload(payload);
+        return std::string(response.begin(), response.end());
+    }
+
+private:
+    detail::socket_handle sock_ = detail::invalid_socket;
+    void require_connected() const { if (!connected()) throw std::runtime_error("TCP client is not connected"); }
+};
 
 } // namespace smt_wire
