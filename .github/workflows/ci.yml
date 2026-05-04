@@ -21,6 +21,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Python client smoke
         run: python clients/tests/test_python_client.py
+      - name: Live server end-to-end
+        run: python clients/tests/test_live_server.py
       - name: C++ client smoke
         shell: bash
         run: |
