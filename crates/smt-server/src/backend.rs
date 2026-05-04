@@ -84,7 +84,7 @@ impl QueryResult {
     }
 }
 
-/// Backend interface shared by the CLI server, racing layer, cache tests, and
+/// Backend interface shared by the TCP server, racing layer, cache tests, and
 /// SMT-LIB path.
 pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;

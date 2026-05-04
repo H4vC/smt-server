@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use smt_wire::{request_flags, tag, BinaryRequest, BlobRef, ExprView, NodeRef, Sort, WireError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,13 +21,35 @@ pub fn request_to_smt2(request: &BinaryRequest) -> smt_wire::Result<Smt2Script> 
     let variables = collect_variables(&expr)?;
     let mut out = String::new();
     out.push_str("(set-logic QF_BV)\n");
+    if request.envelope.budget_ms != 0 {
+        out.push_str(&format!(
+            "(set-option :timeout {})\n",
+            request.envelope.budget_ms
+        ));
+    }
     if (request.envelope.flags & request_flags::WANT_CORE) != 0 {
         out.push_str("(set-option :produce-unsat-cores true)\n");
     }
     if (request.envelope.flags & request_flags::WANT_MODEL) != 0 {
         out.push_str("(set-option :produce-models true)\n");
     }
+    let mut declared = HashMap::<String, (Sort, u32)>::new();
     for variable in &variables {
+        match declared.get(&variable.name) {
+            Some(&(sort, width)) if sort == variable.sort && width == variable.width => continue,
+            Some(&(sort, width)) => {
+                return Err(WireError::invalid(
+                    "SMT-LIB translation",
+                    format!(
+                        "symbol {:?} is used with both {:?}/{} and {:?}/{} sorts",
+                        variable.name, sort, width, variable.sort, variable.width
+                    ),
+                ))
+            }
+            None => {
+                declared.insert(variable.name.clone(), (variable.sort, variable.width));
+            }
+        }
         out.push_str("(declare-fun ");
         out.push_str(&quote_symbol(&variable.name));
         out.push_str(" () ");
@@ -58,9 +82,12 @@ pub fn request_to_smt2(request: &BinaryRequest) -> smt_wire::Result<Smt2Script> 
     out.push_str("(check-sat)\n");
     if (request.envelope.flags & request_flags::WANT_MODEL) != 0 && !variables.is_empty() {
         out.push_str("(get-value (");
+        let mut emitted = HashSet::new();
         for variable in &variables {
-            out.push(' ');
-            out.push_str(&quote_symbol(&variable.name));
+            if emitted.insert(variable.name.clone()) {
+                out.push(' ');
+                out.push_str(&quote_symbol(&variable.name));
+            }
         }
         out.push_str("))\n");
     }

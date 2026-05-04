@@ -47,20 +47,25 @@ impl Backend for RacingBackend {
         }
         drop(tx);
         let mut first_unknown = None;
-        let mut first_conclusive: Option<(&'static str, QueryResult)> = None;
-        for (name, result) in rx {
+        while let Ok((name, result)) = rx.recv() {
             match result {
                 Ok(result) if result.is_conclusive() => {
-                    if let Some((winner, previous)) = &first_conclusive {
-                        if previous.status != result.status {
-                            eprintln!(
-                                "backend disagreement: {winner} returned {:?}, {name} returned {:?}",
-                                previous.status, result.status
-                            );
+                    let winner_status = result.status;
+                    thread::spawn(move || {
+                        for (other_name, other_result) in rx {
+                            if let Ok(other_result) = other_result {
+                                if other_result.is_conclusive()
+                                    && other_result.status != winner_status
+                                {
+                                    eprintln!(
+                                        "backend disagreement: {name} returned {:?}, {other_name} returned {:?}",
+                                        winner_status, other_result.status
+                                    );
+                                }
+                            }
                         }
-                    } else {
-                        first_conclusive = Some((name, result));
-                    }
+                    });
+                    return Ok(result);
                 }
                 Ok(result) => {
                     first_unknown.get_or_insert(result);
@@ -69,9 +74,6 @@ impl Backend for RacingBackend {
                     first_unknown.get_or_insert_with(|| QueryResult::unknown(err.to_string()));
                 }
             }
-        }
-        if let Some((_name, result)) = first_conclusive {
-            return Ok(result);
         }
         Ok(
             first_unknown

@@ -36,34 +36,48 @@ pub fn response_from_query_result(
 ) -> smt_wire::Result<BinaryResponse> {
     let request_id = request.envelope.request_id;
     match request.envelope.command {
-        Command::Solve => solve_response(request_id, result),
+        Command::Solve => solve_response(request, result),
         Command::Simplify => simplify_response(request_id, result),
-        Command::Minimize | Command::Maximize => optimize_response(request_id, result),
+        Command::Minimize | Command::Maximize => optimize_response(request, result),
     }
 }
 
-fn solve_response(request_id: u32, result: QueryResult) -> smt_wire::Result<BinaryResponse> {
+fn solve_response(
+    request: &BinaryRequest,
+    result: QueryResult,
+) -> smt_wire::Result<BinaryResponse> {
+    let request_id = request.envelope.request_id;
+    let want_model = (request.envelope.flags & smt_wire::request_flags::WANT_MODEL) != 0;
+    let want_core = (request.envelope.flags & smt_wire::request_flags::WANT_CORE) != 0;
     match result.status {
         QueryStatus::Sat => {
-            if let Some(model) = result.model {
-                BinaryResponse::new(
-                    request_id,
-                    Status::Sat,
-                    response_flags::HAS_MODEL,
-                    model.encode()?,
-                )
+            if want_model {
+                if let Some(model) = result.model {
+                    BinaryResponse::new(
+                        request_id,
+                        Status::Sat,
+                        response_flags::HAS_MODEL,
+                        model.encode()?,
+                    )
+                } else {
+                    BinaryResponse::new(request_id, Status::Sat, 0, Vec::new())
+                }
             } else {
                 BinaryResponse::new(request_id, Status::Sat, 0, Vec::new())
             }
         }
         QueryStatus::Unsat => {
-            if let Some(core) = result.core {
-                BinaryResponse::new(
-                    request_id,
-                    Status::Unsat,
-                    response_flags::HAS_CORE,
-                    core.encode()?,
-                )
+            if want_core {
+                if let Some(core) = result.core {
+                    BinaryResponse::new(
+                        request_id,
+                        Status::Unsat,
+                        response_flags::HAS_CORE,
+                        core.encode()?,
+                    )
+                } else {
+                    BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new())
+                }
             } else {
                 BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new())
             }
@@ -93,12 +107,20 @@ fn simplify_response(request_id: u32, result: QueryResult) -> smt_wire::Result<B
     }
 }
 
-fn optimize_response(request_id: u32, result: QueryResult) -> smt_wire::Result<BinaryResponse> {
+fn optimize_response(
+    request: &BinaryRequest,
+    result: QueryResult,
+) -> smt_wire::Result<BinaryResponse> {
+    let request_id = request.envelope.request_id;
     match result.status {
         QueryStatus::Sat => {
-            let optimization = result.optimization.ok_or_else(|| {
+            let mut optimization = result.optimization.ok_or_else(|| {
                 WireError::invalid("optimization response", "SAT result without optimum block")
             })?;
+            let want_model = (request.envelope.flags & smt_wire::request_flags::WANT_MODEL) != 0;
+            if !want_model {
+                optimization.model = None;
+            }
             let mut flags = response_flags::HAS_VALUE;
             if optimization.model.is_some() {
                 flags |= response_flags::HAS_MODEL;
