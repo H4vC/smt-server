@@ -6,7 +6,9 @@ use std::thread;
 use smt_wire::{le, BinaryResponse};
 
 use crate::backend::Backend;
-use crate::cache::ResponseCache;
+use crate::cache::{
+    binary_request_id, cache_key_for_payload, rebind_cached_response, ResponseCache,
+};
 use crate::protocol::handle_binary_frame;
 use crate::smtlib::handle_text_frame;
 
@@ -50,24 +52,33 @@ fn handle_connection(mut stream: TcpStream, config: Arc<ServerConfig>) -> std::i
         let mut payload = vec![0u8; frame_len];
         stream.read_exact(&mut payload)?;
 
-        let response_payload = if let Some(cache) = &config.cache {
-            if let Some(response) = cache.get(&payload) {
-                response
-            } else {
-                let response = dispatch_payload(&payload, config.backend.as_ref());
-                cache.insert(payload.clone(), response.clone());
-                response
-            }
-        } else {
-            dispatch_payload(&payload, config.backend.as_ref())
-        };
+        let response_payload =
+            dispatch_payload_with_cache(&payload, config.backend.as_ref(), config.cache.as_deref());
         let frame = le::encode_transport_frame(&response_payload)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         stream.write_all(&frame)?;
     }
 }
 
-fn dispatch_payload(payload: &[u8], backend: &dyn Backend) -> Vec<u8> {
+pub fn dispatch_payload_with_cache(
+    payload: &[u8],
+    backend: &dyn Backend,
+    cache: Option<&ResponseCache>,
+) -> Vec<u8> {
+    if let Some(cache) = cache {
+        let key = cache_key_for_payload(payload);
+        let request_id = binary_request_id(payload);
+        if let Some(response) = cache.lookup(&key) {
+            return rebind_cached_response(response, request_id);
+        }
+        let response = dispatch_payload(payload, backend);
+        cache.insert(key, response.clone());
+        return response;
+    }
+    dispatch_payload(payload, backend)
+}
+
+pub fn dispatch_payload(payload: &[u8], backend: &dyn Backend) -> Vec<u8> {
     if smt_wire::request::is_binary_request_payload(payload) {
         match handle_binary_frame(payload, backend).and_then(|response| response.encode()) {
             Ok(bytes) => bytes,

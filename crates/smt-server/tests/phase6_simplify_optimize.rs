@@ -84,7 +84,12 @@ fn signed_optimization_uses_signed_ordering_and_can_return_model() {
     let optimum = OptimizationValueBlock::decode(&response.payload, true).unwrap();
     // 4-bit signed minimum is -8, encoded as 0b1000.
     assert_eq!(optimum.optimum.bytes, vec![8]);
-    assert!(optimum.model.unwrap().entries.iter().any(|entry| entry.value.bytes == vec![8]));
+    assert!(optimum
+        .model
+        .unwrap()
+        .entries
+        .iter()
+        .any(|entry| entry.value.bytes == vec![8]));
 
     let mut builder = ExprBuilder::new();
     let x = builder.bv_var("x", 4).unwrap();

@@ -69,7 +69,8 @@ fn smt2_translation_contains_declarations_and_named_assertions() {
     let one = builder.bv_const(1, 4).unwrap();
     let eq = builder.bv_eq(x, one).unwrap();
     builder.assert_named("x_is_one", eq).unwrap();
-    let request = BinaryRequest::parse(&builder.build_solve_request(1, 0, true, true).unwrap()).unwrap();
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(1, 0, true, true).unwrap()).unwrap();
     let smt2 = request_to_smt2(&request).unwrap();
     assert!(smt2.script.contains("(declare-fun x () (_ BitVec 4))"));
     assert!(smt2.script.contains(":named x_is_one"));
@@ -79,7 +80,9 @@ fn smt2_translation_contains_declarations_and_named_assertions() {
 
 struct UnknownBackend;
 impl Backend for UnknownBackend {
-    fn name(&self) -> &'static str { "unknown-test" }
+    fn name(&self) -> &'static str {
+        "unknown-test"
+    }
     fn handle(&self, _request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         Ok(QueryResult::unknown("test unknown"))
     }
@@ -90,8 +93,12 @@ fn racing_backend_waits_past_unknown_for_conclusive_result() {
     let mut builder = ExprBuilder::new();
     let t = builder.bool_true().unwrap();
     builder.assert(t).unwrap();
-    let request = BinaryRequest::parse(&builder.build_solve_request(3, 0, false, false).unwrap()).unwrap();
-    let racing = RacingBackend::new(vec![Arc::new(UnknownBackend), Arc::new(ExhaustiveBackend::default())]);
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(3, 0, false, false).unwrap()).unwrap();
+    let racing = RacingBackend::new(vec![
+        Arc::new(UnknownBackend),
+        Arc::new(ExhaustiveBackend::default()),
+    ]);
     let result = racing.handle(&request).unwrap();
     assert!(result.is_conclusive());
 }
