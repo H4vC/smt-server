@@ -262,10 +262,8 @@ impl<'a> ExprView<'a> {
                 ),
             ));
         }
-        let offset = self
-            .node_offset
-            .checked_add(index as usize * NODE_RECORD_LEN)
-            .ok_or(WireError::IntegerOverflow("node offset"))?;
+        let index_bytes = le::checked_mul(index as usize, NODE_RECORD_LEN, "node offset")?;
+        let offset = le::checked_add(self.node_offset, index_bytes, "node offset")?;
         RawNode::decode(self.bytes, offset)
     }
 
@@ -279,10 +277,8 @@ impl<'a> ExprView<'a> {
                 ),
             ));
         }
-        let offset = self
-            .child_offset
-            .checked_add(index as usize * 4)
-            .ok_or(WireError::IntegerOverflow("child offset"))?;
+        let index_bytes = le::checked_mul(index as usize, 4, "child offset")?;
+        let offset = le::checked_add(self.child_offset, index_bytes, "child offset")?;
         Ok(NodeRef::from_raw(le::read_u32(
             self.bytes,
             offset,
@@ -550,7 +546,7 @@ fn validate_arity(index: u32, tag: Tag, arity: u8) -> Result<()> {
 }
 
 fn validate_select_arity(index: u32, arity: u8) -> Result<()> {
-    if arity == 0 || arity % 2 == 0 {
+    if arity == 0 || arity.is_multiple_of(2) {
         return Err(WireError::invalid(
             "BV_SELECT arity",
             format!("node {index} has arity {arity}, expected odd 2N+1"),
@@ -716,7 +712,7 @@ fn expect_same_child_width(index: u32, tag: Tag, lhs: u32, rhs: u32) -> Result<(
 
 pub(crate) fn bytes_for_width(width: u32) -> Result<usize> {
     validate_bv_width_value(width, "scalar width")?;
-    Ok(((width as usize) + 7) / 8)
+    Ok((width as usize).div_ceil(8))
 }
 
 /// Validate a typed node reference against an already-validated expression view.
