@@ -12,6 +12,7 @@ pub struct TextQuery {
     pub request: BinaryRequest,
     pub want_model: bool,
     pub want_core: bool,
+    pub get_values: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,7 @@ struct ScriptState {
     env: HashMap<String, Binding>,
     want_model: bool,
     want_core: bool,
+    get_values: Vec<String>,
     saw_check_sat: bool,
 }
 
@@ -81,7 +83,8 @@ pub fn parse_smtlib_script(script: &str) -> smt_wire::Result<TextQuery> {
             "assert" => assert_command(&mut state, &list)?,
             "check-sat" => state.saw_check_sat = true,
             "check-sat-assuming" => check_sat_assuming(&mut state, &list)?,
-            "get-model" | "get-value" => state.want_model = true,
+            "get-model" => state.want_model = true,
+            "get-value" => get_value_command(&mut state, &list)?,
             "get-unsat-core" => state.want_core = true,
             other => {
                 return Err(WireError::invalid(
@@ -106,6 +109,7 @@ pub fn parse_smtlib_script(script: &str) -> smt_wire::Result<TextQuery> {
         request,
         want_model: state.want_model,
         want_core: state.want_core,
+        get_values: state.get_values,
     })
 }
 
@@ -243,6 +247,29 @@ fn check_sat_assuming(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Resu
         state.builder.assume(binding.node)?;
     }
     state.saw_check_sat = true;
+    Ok(())
+}
+
+fn get_value_command(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Result<()> {
+    if list.len() != 2 {
+        return Err(WireError::invalid("get-value", "expected one term list"));
+    }
+    let terms = match &list[1] {
+        SExpr::List(items) => items,
+        _ => return Err(WireError::invalid("get-value", "expected term list")),
+    };
+    state.want_model = true;
+    for term in terms {
+        match term {
+            SExpr::Atom(name) => state.get_values.push(name.clone()),
+            _ => {
+                return Err(WireError::invalid(
+                    "get-value",
+                    "this frontend supports get-value for declared symbols",
+                ))
+            }
+        }
+    }
     Ok(())
 }
 
@@ -651,10 +678,19 @@ fn text_response(query: &TextQuery, result: QueryResult) -> String {
             let mut out = "sat\n".to_owned();
             if query.want_model {
                 if let Some(model) = result.model {
-                    out.push_str(
-                        &format_model(&query.request, &model)
-                            .unwrap_or_else(|err| format!("; model formatting error: {err}\n")),
-                    );
+                    if query.get_values.is_empty() {
+                        out.push_str(
+                            &format_model(&query.request, &model)
+                                .unwrap_or_else(|err| format!("; model formatting error: {err}\n")),
+                        );
+                    } else {
+                        out.push_str(
+                            &format_get_values(&query.request, &model, &query.get_values)
+                                .unwrap_or_else(|err| {
+                                    format!("; get-value formatting error: {err}\n")
+                                }),
+                        );
+                    }
                 }
             }
             out
@@ -705,6 +741,40 @@ fn format_model(request: &BinaryRequest, model: &ModelBlock) -> smt_wire::Result
     Ok(out)
 }
 
+fn format_get_values(
+    request: &BinaryRequest,
+    model: &ModelBlock,
+    names: &[String],
+) -> smt_wire::Result<String> {
+    let expr = request.expression_view()?;
+    let mut values = HashMap::new();
+    for entry in &model.entries {
+        let node = expr.node(entry.node_ref.index())?;
+        let name = expr.blob_str(
+            smt_wire::BlobRef::from_payload(node.payload),
+            "model variable",
+        )?;
+        values.insert(name.to_owned(), scalar_to_smt_value(&entry.value));
+    }
+    let mut out = "(".to_owned();
+    let mut emitted = 0usize;
+    for name in names {
+        if let Some(value) = values.get(name) {
+            if emitted > 0 {
+                out.push(' ');
+            }
+            emitted += 1;
+            out.push('(');
+            out.push_str(&quote_symbol(name));
+            out.push(' ');
+            out.push_str(value);
+            out.push(')');
+        }
+    }
+    out.push_str(")\n");
+    Ok(out)
+}
+
 fn format_core(core: &UnsatCoreBlock) -> String {
     let mut out = "(".to_owned();
     for (index, name) in core.names.iter().enumerate() {
@@ -715,6 +785,18 @@ fn format_core(core: &UnsatCoreBlock) -> String {
     }
     out.push_str(")\n");
     out
+}
+
+fn scalar_to_smt_value(value: &ScalarValue) -> String {
+    if value.width == 0 {
+        if value.bytes[0] == 0 {
+            "false".to_owned()
+        } else {
+            "true".to_owned()
+        }
+    } else {
+        scalar_to_bv_literal(value)
+    }
 }
 
 fn scalar_to_bv_literal(value: &ScalarValue) -> String {

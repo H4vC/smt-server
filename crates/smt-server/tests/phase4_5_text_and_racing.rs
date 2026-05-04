@@ -32,6 +32,21 @@ fn smtlib_text_frontend_rejects_incremental_commands() {
 }
 
 #[test]
+fn smtlib_text_frontend_get_value_formats_value_response() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 2))
+        (assert (= x #b10))
+        (check-sat)
+        (get-value (x))
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &ExhaustiveBackend::default()).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+    assert!(text.contains("((x #b10))"), "{text}");
+}
+
+#[test]
 fn smtlib_text_frontend_named_unsat_core() {
     let script = r#"
         (set-logic QF_BV)
