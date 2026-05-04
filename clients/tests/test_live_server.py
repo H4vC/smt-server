@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import socket
-import struct
 import subprocess
 import sys
 import time
@@ -87,22 +87,37 @@ class LiveServer:
             self.proc.wait(timeout=5)
 
 
-def recv_exact(sock: socket.socket, length: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = length
-    while remaining:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise EOFError("socket closed while reading response")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+def cpp_compiler() -> str | None:
+    configured = os.environ.get("CXX")
+    if configured and shutil.which(configured):
+        return configured
+    for candidate in ("clang++", "g++", "c++"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
 
 
-def send_frame(sock: socket.socket, payload: bytes) -> bytes:
-    sock.sendall(smt.frame(payload))
-    (length,) = struct.unpack("<I", recv_exact(sock, 4))
-    return recv_exact(sock, length)
+def test_cpp_client_live_round_trip(port: int) -> None:
+    compiler = cpp_compiler()
+    if compiler is None:
+        print("No C++ compiler available; skipping live C++ client test")
+        return
+    exe = REPO_ROOT / "target" / ("cpp_live_client.exe" if os.name == "nt" else "cpp_live_client")
+    cmd = [
+        compiler,
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        str(REPO_ROOT / "clients" / "tests" / "cpp_live_client.cpp"),
+        "-o",
+        str(exe),
+    ]
+    if os.name == "nt":
+        cmd.append("-lws2_32")
+    subprocess.check_call(cmd, cwd=REPO_ROOT)
+    subprocess.check_call([str(exe), "127.0.0.1", str(port)], cwd=REPO_ROOT)
 
 
 def assert_model_has_value(entries: Iterable[smt.ModelEntry], width: int, value: int) -> None:
@@ -112,37 +127,37 @@ def assert_model_has_value(entries: Iterable[smt.ModelEntry], width: int, value:
     raise AssertionError(f"model does not contain {width}-bit value {value}")
 
 
-def test_python_client_binary_round_trip(sock: socket.socket) -> None:
+def test_python_client_binary_round_trip(client: smt.TcpClient) -> None:
     builder = smt.Builder()
     x = builder.bv_var("x", 4)
     builder.assert_(builder.bv_eq(x, builder.bv_const(2, 4)))
 
-    response = smt.parse_response(send_frame(sock, builder.build_solve_request(0x1001, want_model=True)))
+    response = client.send_request(builder.build_solve_request(0x1001, want_model=True))
     assert response.request_id == 0x1001
     assert response.status == smt.SAT
     assert response.flags == smt.HAS_MODEL
     assert_model_has_value(response.model(), 4, 2)
 
 
-def test_binary_cache_rebinds_response_ids(sock: socket.socket) -> None:
+def test_binary_cache_rebinds_response_ids(client: smt.TcpClient) -> None:
     builder = smt.Builder()
     x = builder.bv_var("cached", 3)
     builder.assert_(builder.bv_eq(x, builder.bv_const(5, 3)))
 
-    first = smt.parse_response(send_frame(sock, builder.build_solve_request(0x2001)))
-    second = smt.parse_response(send_frame(sock, builder.build_solve_request(0x2002)))
+    first = client.send_request(builder.build_solve_request(0x2001))
+    second = client.send_request(builder.build_solve_request(0x2002))
     assert first.request_id == 0x2001
     assert second.request_id == 0x2002
     assert first.status == smt.SAT
     assert second.status == smt.SAT
 
 
-def test_python_client_optimization_round_trip(sock: socket.socket) -> None:
+def test_python_client_optimization_round_trip(client: smt.TcpClient) -> None:
     builder = smt.Builder()
     x = builder.bv_var("opt", 4)
     builder.assert_(builder.bv_uge(x, builder.bv_const(5, 4)))
 
-    response = smt.parse_response(send_frame(sock, builder.build_minimize_request(0x3001, x)))
+    response = client.send_request(builder.build_minimize_request(0x3001, x))
     assert response.request_id == 0x3001
     assert response.status == smt.SAT
     assert response.flags == smt.HAS_VALUE
@@ -151,7 +166,7 @@ def test_python_client_optimization_round_trip(sock: socket.socket) -> None:
     assert optimum.as_int() == 5
 
 
-def test_text_smtlib_round_trip(sock: socket.socket) -> None:
+def test_text_smtlib_round_trip(client: smt.TcpClient) -> None:
     script = b"""
         #| yaspar parses this block comment in the live text path |#
         (set-logic QF_BV)
@@ -160,18 +175,19 @@ def test_text_smtlib_round_trip(sock: socket.socket) -> None:
         (check-sat)
         (get-value (|x y|))
     """
-    text = send_frame(sock, script).decode("utf-8")
+    text = client.send_text(script)
     assert text.startswith("sat\n"), text
     assert "(|x y| #b11)" in text, text
 
 
 def main() -> None:
     with LiveServer() as server:
-        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
-            test_python_client_binary_round_trip(sock)
-            test_binary_cache_rebinds_response_ids(sock)
-            test_python_client_optimization_round_trip(sock)
-            test_text_smtlib_round_trip(sock)
+        with smt.TcpClient("127.0.0.1", server.port, timeout=5) as client:
+            test_python_client_binary_round_trip(client)
+            test_binary_cache_rebinds_response_ids(client)
+            test_python_client_optimization_round_trip(client)
+            test_text_smtlib_round_trip(client)
+        test_cpp_client_live_round_trip(server.port)
 
 
 if __name__ == "__main__":

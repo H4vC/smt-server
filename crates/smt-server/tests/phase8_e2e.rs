@@ -1,11 +1,10 @@
-use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use smt_server::{serve_tcp, BinbitBackend, RacingBackend, ServerConfig, Z3Backend};
-use smt_wire::{le, response_flags, BinaryResponse, ExprBuilder, ModelBlock, Status};
+use smt_wire::{response_flags, ExprBuilder, ModelBlock, Status, TcpClient};
 
 fn start_default_test_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -29,22 +28,10 @@ fn start_default_test_server() -> SocketAddr {
     panic!("test server did not start on {addr}");
 }
 
-fn send_frame(stream: &mut TcpStream, payload: &[u8]) -> Vec<u8> {
-    let frame = le::encode_transport_frame(payload).unwrap();
-    stream.write_all(&frame).unwrap();
-
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len).unwrap();
-    let len = u32::from_le_bytes(len) as usize;
-    let mut response = vec![0u8; len];
-    stream.read_exact(&mut response).unwrap();
-    response
-}
-
 #[test]
 fn live_tcp_server_handles_binary_text_and_cached_requests() {
     let addr = start_default_test_server();
-    let mut stream = TcpStream::connect(addr).unwrap();
+    let mut client = TcpClient::connect(addr).unwrap();
 
     let mut builder = ExprBuilder::new();
     let x = builder.bv_var("x", 4).unwrap();
@@ -53,7 +40,7 @@ fn live_tcp_server_handles_binary_text_and_cached_requests() {
     builder.assert(eq).unwrap();
     let request = builder.build_solve_request(0x1001, 0, true, false).unwrap();
 
-    let response = BinaryResponse::parse(&send_frame(&mut stream, &request)).unwrap();
+    let response = client.send_binary_request(&request).unwrap();
     assert_eq!(response.envelope.request_id, 0x1001);
     assert_eq!(response.envelope.status, Status::Sat);
     assert_eq!(response.envelope.flags, response_flags::HAS_MODEL);
@@ -69,14 +56,14 @@ fn live_tcp_server_handles_binary_text_and_cached_requests() {
     let second_cached = builder
         .build_solve_request(0x2002, 0, false, false)
         .unwrap();
-    let first = BinaryResponse::parse(&send_frame(&mut stream, &first_cached)).unwrap();
-    let second = BinaryResponse::parse(&send_frame(&mut stream, &second_cached)).unwrap();
+    let first = client.send_binary_request(&first_cached).unwrap();
+    let second = client.send_binary_request(&second_cached).unwrap();
     assert_eq!(first.envelope.request_id, 0x2001);
     assert_eq!(second.envelope.request_id, 0x2002);
     assert_eq!(first.envelope.status, Status::Sat);
     assert_eq!(second.envelope.status, Status::Sat);
 
-    let text_script = br#"
+    let text_script = r#"
         #| yaspar parses block comments in the live text path |#
         (set-logic QF_BV)
         (declare-const |x y| (_ BitVec 2))
@@ -84,7 +71,7 @@ fn live_tcp_server_handles_binary_text_and_cached_requests() {
         (check-sat)
         (get-value (|x y|))
     "#;
-    let text_response = String::from_utf8(send_frame(&mut stream, text_script)).unwrap();
+    let text_response = client.send_text(text_script).unwrap();
     assert!(text_response.starts_with("sat\n"), "{text_response}");
     assert!(text_response.contains("(|x y| #b11)"), "{text_response}");
 }
