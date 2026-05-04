@@ -3,14 +3,14 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
-use smt_server::{handle_binary_frame, serve_tcp, ExhaustiveBackend, ServerConfig};
+use smt_server::{handle_binary_frame, serve_tcp, BinbitBackend, ServerConfig, Z3Backend};
 use smt_wire::{
     le, response_flags, status, BinaryResponse, ExprBuilder, ModelBlock, NodeRef, Status,
     UnsatCoreBlock,
 };
 
 #[test]
-fn exhaustive_backend_solves_sat_with_model() {
+fn binbit_backend_solves_sat_with_model() {
     let mut builder = ExprBuilder::new();
     let x = builder.bv_var("x", 2).unwrap();
     let one = builder.bv_const(1, 2).unwrap();
@@ -18,7 +18,7 @@ fn exhaustive_backend_solves_sat_with_model() {
     builder.assert(eq).unwrap();
     let request = builder.build_solve_request(11, 0, true, false).unwrap();
 
-    let response = handle_binary_frame(&request, &ExhaustiveBackend::default())
+    let response = handle_binary_frame(&request, &BinbitBackend)
         .unwrap()
         .encode()
         .unwrap();
@@ -36,7 +36,7 @@ fn exhaustive_backend_solves_sat_with_model() {
 }
 
 #[test]
-fn exhaustive_backend_solves_unsat_with_named_core() {
+fn binbit_backend_solves_unsat_with_named_core() {
     let mut builder = ExprBuilder::new();
     let p = builder.bool_var("p").unwrap();
     let not_p = builder.bool_not(p).unwrap();
@@ -44,7 +44,7 @@ fn exhaustive_backend_solves_unsat_with_named_core() {
     builder.assert_named("p-is-false", not_p).unwrap();
     let request = builder.build_solve_request(12, 0, false, true).unwrap();
 
-    let response = handle_binary_frame(&request, &ExhaustiveBackend::default())
+    let response = handle_binary_frame(&request, &BinbitBackend)
         .unwrap()
         .encode()
         .unwrap();
@@ -56,20 +56,28 @@ fn exhaustive_backend_solves_unsat_with_named_core() {
 }
 
 #[test]
-fn exhaustive_backend_returns_unknown_when_enumeration_limit_is_exceeded() {
+fn z3_backend_solves_sat_with_model() {
     let mut builder = ExprBuilder::new();
-    let x = builder.bv_var("x", 8).unwrap();
-    let y = builder.bv_var("y", 8).unwrap();
-    let eq = builder.bv_eq(x, y).unwrap();
+    let x = builder.bv_var("x", 4).unwrap();
+    let three = builder.bv_const(3, 4).unwrap();
+    let eq = builder.bv_eq(x, three).unwrap();
     builder.assert(eq).unwrap();
-    let request = builder.build_solve_request(13, 0, false, false).unwrap();
+    let request = builder.build_solve_request(13, 0, true, false).unwrap();
 
-    let response = handle_binary_frame(&request, &ExhaustiveBackend::new(10))
+    let response = handle_binary_frame(&request, &Z3Backend)
         .unwrap()
         .encode()
         .unwrap();
     let response = BinaryResponse::parse(&response).unwrap();
-    assert_eq!(response.envelope.status, Status::Unknown);
+    assert_eq!(response.envelope.status, Status::Sat);
+    let model = ModelBlock::decode(&response.payload).unwrap();
+    let x_entry = model
+        .entries
+        .iter()
+        .find(|entry| entry.node_ref == NodeRef::bv(0).unwrap())
+        .unwrap();
+    assert_eq!(x_entry.value.width, 4);
+    assert_eq!(x_entry.value.bytes, vec![3]);
 }
 
 #[test]
@@ -81,10 +89,7 @@ fn tcp_server_handles_one_binary_frame() {
     let handle = thread::spawn(move || {
         // The server runs until the client closes; this test relies on process
         // teardown to clean up the background thread after one request.
-        let _ = serve_tcp(
-            addr,
-            ServerConfig::new(Arc::new(ExhaustiveBackend::default())),
-        );
+        let _ = serve_tcp(addr, ServerConfig::new(Arc::new(BinbitBackend)));
     });
 
     let mut builder = ExprBuilder::new();

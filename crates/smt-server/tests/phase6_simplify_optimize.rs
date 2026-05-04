@@ -1,4 +1,4 @@
-use smt_server::{handle_binary_frame, ExhaustiveBackend};
+use smt_server::{handle_binary_frame, BinbitBackend, Z3Backend};
 use smt_wire::{
     response_flags, BinaryResponse, ExprBuilder, OptimizationValueBlock, SimplifyBlock, Status,
 };
@@ -9,7 +9,7 @@ fn simplify_returns_simplify_block() {
     let t = builder.bool_true().unwrap();
     builder.assert(t).unwrap();
     let request = builder.build_simplify_request(21).unwrap();
-    let response = handle_binary_frame(&request, &ExhaustiveBackend::default())
+    let response = handle_binary_frame(&request, &BinbitBackend)
         .unwrap()
         .encode()
         .unwrap();
@@ -32,7 +32,7 @@ fn unsigned_minimize_and_maximize_return_optimum_values() {
         .build_minimize_request(22, x, false, 0, false)
         .unwrap();
     let response = BinaryResponse::parse(
-        &handle_binary_frame(&request, &ExhaustiveBackend::default())
+        &handle_binary_frame(&request, &BinbitBackend)
             .unwrap()
             .encode()
             .unwrap(),
@@ -53,7 +53,7 @@ fn unsigned_minimize_and_maximize_return_optimum_values() {
         .build_maximize_request(23, y, false, 0, false)
         .unwrap();
     let response = BinaryResponse::parse(
-        &handle_binary_frame(&request, &ExhaustiveBackend::default())
+        &handle_binary_frame(&request, &BinbitBackend)
             .unwrap()
             .encode()
             .unwrap(),
@@ -71,7 +71,7 @@ fn signed_optimization_uses_signed_ordering_and_can_return_model() {
         .build_minimize_request(24, x, true, 0, true)
         .unwrap();
     let response = BinaryResponse::parse(
-        &handle_binary_frame(&request, &ExhaustiveBackend::default())
+        &handle_binary_frame(&request, &BinbitBackend)
             .unwrap()
             .encode()
             .unwrap(),
@@ -97,7 +97,7 @@ fn signed_optimization_uses_signed_ordering_and_can_return_model() {
         .build_maximize_request(25, x, true, 0, false)
         .unwrap();
     let response = BinaryResponse::parse(
-        &handle_binary_frame(&request, &ExhaustiveBackend::default())
+        &handle_binary_frame(&request, &BinbitBackend)
             .unwrap()
             .encode()
             .unwrap(),
@@ -106,4 +106,26 @@ fn signed_optimization_uses_signed_ordering_and_can_return_model() {
     let optimum = OptimizationValueBlock::decode(&response.payload, false).unwrap();
     // 4-bit signed maximum is +7.
     assert_eq!(optimum.optimum.bytes, vec![7]);
+}
+
+#[test]
+fn z3_backend_optimization_uses_bit_hunt() {
+    let mut builder = ExprBuilder::new();
+    let x = builder.bv_var("x", 4).unwrap();
+    let five = builder.bv_const(5, 4).unwrap();
+    let ge = builder.bv_uge(x, five).unwrap();
+    builder.assert(ge).unwrap();
+    let request = builder
+        .build_minimize_request(26, x, false, 0, false)
+        .unwrap();
+    let response = BinaryResponse::parse(
+        &handle_binary_frame(&request, &Z3Backend)
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response.envelope.status, Status::Sat);
+    let optimum = OptimizationValueBlock::decode(&response.payload, false).unwrap();
+    assert_eq!(optimum.optimum.bytes, vec![5]);
 }

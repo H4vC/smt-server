@@ -1,22 +1,10 @@
-# Second backend evaluation
+# Solver backend integration
 
-Phase 5 evaluated the planned second-backend options against the current repository constraints: dependency-free CI on Windows, macOS, and Linux, no required system solver in the build, and a backend interface that can race multiple implementations.
+The server currently integrates two real solver backends behind the shared `Backend` trait:
 
-## binbit
+1. `Z3Backend` (`crates/smt-server/src/z3_backend.rs`) translates validated wire IR directly to Rust `z3` crate ASTs, uses `Solver::check_assumptions`, extracts models and named unsat cores, and implements optimization with a server-side bit-hunt over Z3 assumptions.
+2. `BinbitBackend` (`crates/smt-server/src/binbit_backend.rs`) translates validated wire IR directly to `binbit::SmtSolver`, including assumptions, named unsat cores, model extraction, and binbit's native min/max helpers.
 
-`binbit` is attractive for bit-blasting workloads, but its public API and cross-platform packaging are not stable enough here to make it a mandatory CI dependency. It remains a candidate backend behind the `Backend` trait once packaging is pinned.
+`RacingBackend` can race Z3 and binbit and returns the first conclusive result while continuing to log later backend disagreements.
 
-## Bitwuzla
-
-Bitwuzla has strong QF_BV support, but introducing its native library would make CI and local setup substantially heavier. It is also best added after the protocol/server surface is stable.
-
-## Implemented choice
-
-The repository now includes two practical backends:
-
-1. `ExhaustiveBackend`: dependency-free, deterministic, cross-platform, and useful for tests/small queries.
-2. `Z3CliBackend`: translates validated wire IR to SMT-LIB and invokes a `z3` executable when one is available.
-
-`RacingBackend` can race these (or future binbit/Bitwuzla adapters) and returns the first conclusive result while preserving `UNKNOWN` fallback behavior.
-
-`PooledBackend` provides the phase-7 warm-start hook: it routes structurally similar stateless requests to the same backend instance so future native solvers can retain useful internal state without changing the protocol.
+The previous dependency-free `ExhaustiveBackend` and external-process `Z3CliBackend` were removed from the active server API/configuration. The default executable now starts `RacingBackend(Z3Backend, BinbitBackend)`.

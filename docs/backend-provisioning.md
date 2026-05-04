@@ -1,11 +1,10 @@
 # Backend provisioning
 
-The reference server always builds with the packaged `exhaustive` backend. It is deterministic and dependency-free, intended for tests, golden vectors, malformed-input checks, and small QF_BV/Bool queries.
+The reference server now builds with two solver backends:
 
-The `z3-cli` backend adapter is available for deployments that install the `z3` executable on `PATH`:
+- `Z3Backend` uses the Rust `z3` crate and links Z3 through the crate's `gh-release` feature, so it does not shell out to a `z3` executable.
+- `BinbitBackend` uses the Rust `binbit` solver from `https://github.com/bint-disasm/binbit`.
 
-- Windows: install a Z3 release from <https://github.com/Z3Prover/z3/releases> and add the directory containing `z3.exe` to `PATH`.
-- macOS: `brew install z3`.
-- Linux: use the distribution package (`apt install z3`, `dnf install z3`, etc.) or a release archive from Z3Prover.
+The default server (`crates/smt-server/src/main.rs`) races both backends via `RacingBackend`.
 
-CI does not require Z3; it verifies the portable exhaustive backend on Windows, macOS, and Linux. Z3-specific integration can be enabled in deployments by selecting `Z3CliBackend` or using it as one of the racing backends.
+No standalone `z3` binary is required at runtime, and the old exhaustive/test backend and Z3 CLI adapter have been removed from the public server configuration.
