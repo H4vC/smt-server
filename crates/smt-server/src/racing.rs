@@ -47,9 +47,21 @@ impl Backend for RacingBackend {
         }
         drop(tx);
         let mut first_unknown = None;
-        for (_name, result) in rx {
+        let mut first_conclusive: Option<(&'static str, QueryResult)> = None;
+        for (name, result) in rx {
             match result {
-                Ok(result) if result.is_conclusive() => return Ok(result),
+                Ok(result) if result.is_conclusive() => {
+                    if let Some((winner, previous)) = &first_conclusive {
+                        if previous.status != result.status {
+                            eprintln!(
+                                "backend disagreement: {winner} returned {:?}, {name} returned {:?}",
+                                previous.status, result.status
+                            );
+                        }
+                    } else {
+                        first_conclusive = Some((name, result));
+                    }
+                }
                 Ok(result) => {
                     first_unknown.get_or_insert(result);
                 }
@@ -57,6 +69,9 @@ impl Backend for RacingBackend {
                     first_unknown.get_or_insert_with(|| QueryResult::unknown(err.to_string()));
                 }
             }
+        }
+        if let Some((_name, result)) = first_conclusive {
+            return Ok(result);
         }
         Ok(
             first_unknown
