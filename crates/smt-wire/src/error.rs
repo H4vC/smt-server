@@ -41,7 +41,7 @@ pub enum WireError {
 pub type Result<T> = core::result::Result<T, WireError>;
 
 impl WireError {
-    pub(crate) fn invalid(context: &'static str, message: impl Into<String>) -> Self {
+    pub fn invalid(context: &'static str, message: impl Into<String>) -> Self {
         WireError::InvalidValue {
             context,
             message: message.into(),

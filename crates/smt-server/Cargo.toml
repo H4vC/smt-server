@@ -1,0 +1,9 @@
+[package]
+name = "smt-server"
+version = "0.1.0"
+edition = "2021"
+description = "Reference SMT wire-format server and backends"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+smt-wire = { path = "../smt-wire" }
