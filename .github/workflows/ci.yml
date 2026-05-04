@@ -19,3 +19,18 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Python client smoke
+        run: python clients/tests/test_python_client.py
+      - name: C++ client smoke
+        shell: bash
+        run: |
+          if command -v clang++ >/dev/null 2>&1; then
+            CXX=clang++
+          elif command -v g++ >/dev/null 2>&1; then
+            CXX=g++
+          else
+            echo "No C++ compiler available; skipping smoke test"
+            exit 0
+          fi
+          "$CXX" -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_client_smoke
+          ./cpp_client_smoke
