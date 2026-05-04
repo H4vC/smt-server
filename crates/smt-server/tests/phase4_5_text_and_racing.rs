@@ -25,7 +25,7 @@ fn smtlib_text_frontend_solves_sat_and_formats_model() {
 
 #[test]
 fn smtlib_text_frontend_rejects_incremental_commands() {
-    let script = "(set-logic QF_BV) (push) (check-sat)";
+    let script = "(set-logic QF_BV) (push 1) (check-sat)";
     let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("error"), "{text}");
@@ -62,6 +62,22 @@ fn smtlib_text_frontend_named_unsat_core() {
     assert!(text.starts_with("unsat\n"), "{text}");
     assert!(text.contains("p_true"), "{text}");
     assert!(text.contains("p_false"), "{text}");
+}
+
+#[test]
+fn smtlib_yaspar_parser_handles_block_comments_and_quoted_symbols() {
+    let script = r#"
+        #| block comments are handled by yaspar |#
+        (set-logic QF_BV)
+        (declare-const |x y| (_ BitVec 2))
+        (assert (= |x y| #b11))
+        (check-sat)
+        (get-value (|x y|))
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+    assert!(text.contains("(|x y| #b11)"), "{text}");
 }
 
 #[test]

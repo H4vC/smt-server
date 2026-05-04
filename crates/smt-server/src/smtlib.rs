@@ -1,11 +1,20 @@
 use std::collections::HashMap;
 
+use dashu::{float::DBig, integer::UBig};
 use smt_wire::{
     BinaryRequest, ExprBuilder, ModelBlock, NodeRef, ScalarValue, UnsatCoreBlock, WireError,
 };
 
 use crate::backend::{Backend, QueryResult, QueryStatus};
 use crate::smt2::quote_symbol;
+use yaspar::{
+    action::{
+        ActionOnAttribute, ActionOnConstant, ActionOnIdentifier, ActionOnIndex, ActionOnSort,
+        ActionOnString, ActionOnTerm, ParsingAction, ParsingResult, Pattern,
+    },
+    ast::{DatatypeDec, DatatypeDef, FunctionDef, Keyword},
+    position::Range,
+};
 
 #[derive(Debug, Clone)]
 pub struct TextQuery {
@@ -874,90 +883,572 @@ fn atom(expr: &SExpr) -> smt_wire::Result<&str> {
 }
 
 fn parse_sexprs(input: &str) -> smt_wire::Result<Vec<SExpr>> {
-    let tokens = tokenize(input)?;
-    let mut parser = Parser { tokens, pos: 0 };
-    let mut exprs = Vec::new();
-    while parser.pos < parser.tokens.len() {
-        exprs.push(parser.parse_expr()?);
+    let mut action = SExprAction;
+    yaspar::smtlib2::ScriptParser::new()
+        .parse(&mut action, yaspar::tokenize_str(input, true))
+        .map_err(|err| WireError::invalid("SMT-LIB parser", err.to_string()))
+}
+
+struct SExprAction;
+
+fn sexpr_atom(value: impl Into<String>) -> SExpr {
+    SExpr::Atom(value.into())
+}
+
+fn sexpr_list(items: impl IntoIterator<Item = SExpr>) -> SExpr {
+    SExpr::List(items.into_iter().collect())
+}
+
+fn indexed_symbol(symbol: String, indices: Vec<SExpr>) -> SExpr {
+    if indices.is_empty() {
+        sexpr_atom(symbol)
+    } else {
+        let mut items = Vec::with_capacity(indices.len() + 2);
+        items.push(sexpr_atom("_"));
+        items.push(sexpr_atom(symbol));
+        items.extend(indices);
+        sexpr_list(items)
     }
-    Ok(exprs)
 }
 
-fn tokenize(input: &str) -> smt_wire::Result<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            ';' => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
-                    }
-                }
-            }
-            '(' | ')' => tokens.push(ch.to_string()),
-            c if c.is_whitespace() => {}
-            '|' => {
-                let mut atom = String::new();
-                loop {
-                    match chars.next() {
-                        Some('|') => break,
-                        Some('\\') => atom.push(chars.next().unwrap_or('\\')),
-                        Some(c) => atom.push(c),
-                        None => {
-                            return Err(WireError::invalid(
-                                "SMT-LIB token",
-                                "unterminated quoted symbol",
-                            ))
-                        }
-                    }
-                }
-                tokens.push(atom);
-            }
-            c => {
-                let mut atom = c.to_string();
-                while let Some(&next) = chars.peek() {
-                    if next.is_whitespace() || next == '(' || next == ')' || next == ';' {
-                        break;
-                    }
-                    atom.push(chars.next().expect("peeked char"));
-                }
-                tokens.push(atom);
-            }
-        }
-    }
-    Ok(tokens)
-}
-
-struct Parser {
-    tokens: Vec<String>,
-    pos: usize,
-}
-
-impl Parser {
-    fn parse_expr(&mut self) -> smt_wire::Result<SExpr> {
-        if self.pos >= self.tokens.len() {
-            return Err(WireError::invalid(
-                "SMT-LIB parser",
-                "unexpected end of input",
-            ));
-        }
-        let token = self.tokens[self.pos].clone();
-        self.pos += 1;
-        if token == "(" {
-            let mut items = Vec::new();
-            while self.pos < self.tokens.len() && self.tokens[self.pos] != ")" {
-                items.push(self.parse_expr()?);
-            }
-            if self.pos == self.tokens.len() {
-                return Err(WireError::invalid("SMT-LIB parser", "missing ')'"));
-            }
-            self.pos += 1;
-            Ok(SExpr::List(items))
-        } else if token == ")" {
-            Err(WireError::invalid("SMT-LIB parser", "unexpected ')'"))
+fn byte_bits(bytes: &[u8], len: usize) -> String {
+    let mut out = String::with_capacity(len + 2);
+    out.push_str("#b");
+    for bit in (0..len).rev() {
+        let byte = bytes[bit / 8];
+        out.push(if ((byte >> (bit % 8)) & 1) != 0 {
+            '1'
         } else {
-            Ok(SExpr::Atom(token))
+            '0'
+        });
+    }
+    out
+}
+
+fn byte_hex(bytes: &[u8], len: usize) -> String {
+    let mut out = String::with_capacity(len + 2);
+    out.push_str("#x");
+    for nibble in (0..len).rev() {
+        let byte = bytes[nibble / 2];
+        let value = (byte >> ((nibble % 2) * 4)) & 0xf;
+        out.push(char::from_digit(u32::from(value), 16).expect("hex digit"));
+    }
+    out
+}
+
+fn command(name: &str, args: impl IntoIterator<Item = SExpr>) -> SExpr {
+    let mut items = vec![sexpr_atom(name)];
+    items.extend(args);
+    sexpr_list(items)
+}
+
+fn vars_to_sexpr(vars: Vec<(String, SExpr)>) -> SExpr {
+    sexpr_list(
+        vars.into_iter()
+            .map(|(name, sort)| sexpr_list([sexpr_atom(name), sort])),
+    )
+}
+
+impl ActionOnString for SExprAction {
+    type Str = String;
+
+    fn on_string(&mut self, _range: Range, s: String) -> ParsingResult<Self::Str> {
+        Ok(s)
+    }
+}
+
+impl ActionOnConstant for SExprAction {
+    type Constant = SExpr;
+
+    fn on_constant_binary(
+        &mut self,
+        _range: Range,
+        bytes: Vec<u8>,
+        len: usize,
+    ) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(byte_bits(&bytes, len)))
+    }
+
+    fn on_constant_hexadecimal(
+        &mut self,
+        _range: Range,
+        bytes: Vec<u8>,
+        len: usize,
+    ) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(byte_hex(&bytes, len)))
+    }
+
+    fn on_constant_decimal(
+        &mut self,
+        _range: Range,
+        decimal: DBig,
+    ) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(decimal.to_string()))
+    }
+
+    fn on_constant_numeral(
+        &mut self,
+        _range: Range,
+        numeral: UBig,
+    ) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(numeral.to_string()))
+    }
+
+    fn on_constant_string(
+        &mut self,
+        _range: Range,
+        string: Self::Str,
+    ) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(string))
+    }
+
+    fn on_constant_bool(&mut self, _range: Range, boolean: bool) -> ParsingResult<Self::Constant> {
+        Ok(sexpr_atom(if boolean { "true" } else { "false" }))
+    }
+}
+
+impl ActionOnIndex for SExprAction {
+    type Index = SExpr;
+
+    fn on_index_numeral(&mut self, _range: Range, index: UBig) -> ParsingResult<Self::Index> {
+        Ok(sexpr_atom(index.to_string()))
+    }
+
+    fn on_index_symbol(&mut self, _range: Range, index: Self::Str) -> ParsingResult<Self::Index> {
+        Ok(sexpr_atom(index))
+    }
+
+    fn on_index_hexadecimal(
+        &mut self,
+        _range: Range,
+        bytes: Vec<u8>,
+        len: usize,
+    ) -> ParsingResult<Self::Index> {
+        Ok(sexpr_atom(byte_hex(&bytes, len)))
+    }
+}
+
+impl ActionOnIdentifier for SExprAction {
+    type Identifier = SExpr;
+
+    fn on_identifier(
+        &mut self,
+        _range: Range,
+        symbol: Self::Str,
+        indices: Vec<Self::Index>,
+    ) -> ParsingResult<Self::Identifier> {
+        Ok(indexed_symbol(symbol, indices))
+    }
+}
+
+impl ActionOnAttribute for SExprAction {
+    type Term = SExpr;
+    type Attribute = SExpr;
+
+    fn on_attribute_keyword(
+        &mut self,
+        _range: Range,
+        keyword: Keyword,
+    ) -> ParsingResult<Self::Attribute> {
+        Ok(sexpr_list([sexpr_atom(keyword.to_string())]))
+    }
+
+    fn on_attribute_constant(
+        &mut self,
+        _range: Range,
+        keyword: Keyword,
+        constant: Self::Constant,
+    ) -> ParsingResult<Self::Attribute> {
+        Ok(sexpr_list([sexpr_atom(keyword.to_string()), constant]))
+    }
+
+    fn on_attribute_symbol(
+        &mut self,
+        _range: Range,
+        keyword: Keyword,
+        symbol: Self::Str,
+    ) -> ParsingResult<Self::Attribute> {
+        Ok(sexpr_list([
+            sexpr_atom(keyword.to_string()),
+            sexpr_atom(symbol),
+        ]))
+    }
+
+    fn on_attribute_named(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+    ) -> ParsingResult<Self::Attribute> {
+        Ok(sexpr_list([sexpr_atom(":named"), sexpr_atom(name)]))
+    }
+
+    fn on_attribute_pattern(
+        &mut self,
+        _range: Range,
+        patterns: Vec<Self::Term>,
+    ) -> ParsingResult<Self::Attribute> {
+        Ok(command(":pattern", patterns))
+    }
+}
+
+impl ActionOnSort for SExprAction {
+    type Sort = SExpr;
+
+    fn on_sort(
+        &mut self,
+        _range: Range,
+        identifier: Self::Identifier,
+        args: Vec<Self::Sort>,
+    ) -> ParsingResult<Self::Sort> {
+        if args.is_empty() {
+            Ok(identifier)
+        } else {
+            let mut items = vec![identifier];
+            items.extend(args);
+            Ok(sexpr_list(items))
         }
+    }
+}
+
+impl ActionOnTerm for SExprAction {
+    fn on_term_constant(
+        &mut self,
+        _range: Range,
+        constant: Self::Constant,
+    ) -> ParsingResult<Self::Term> {
+        Ok(constant)
+    }
+
+    fn on_term_identifier(
+        &mut self,
+        _range: Range,
+        identifier: Self::Identifier,
+        sort: Option<Self::Sort>,
+    ) -> ParsingResult<Self::Term> {
+        Ok(match sort {
+            Some(sort) => command("as", [identifier, sort]),
+            None => identifier,
+        })
+    }
+
+    fn on_term_app(
+        &mut self,
+        _range: Range,
+        identifier: Self::Identifier,
+        sort: Option<Self::Sort>,
+        args: Vec<Self::Term>,
+    ) -> ParsingResult<Self::Term> {
+        let head = match sort {
+            Some(sort) => command("as", [identifier, sort]),
+            None => identifier,
+        };
+        let mut items = vec![head];
+        items.extend(args);
+        Ok(sexpr_list(items))
+    }
+
+    fn on_term_let(
+        &mut self,
+        _range: Range,
+        bindings: Vec<(Self::Str, Self::Term)>,
+        body: Self::Term,
+    ) -> ParsingResult<Self::Term> {
+        let binding_list = sexpr_list(
+            bindings
+                .into_iter()
+                .map(|(name, term)| sexpr_list([sexpr_atom(name), term])),
+        );
+        Ok(command("let", [binding_list, body]))
+    }
+
+    fn on_term_lambda(
+        &mut self,
+        _range: Range,
+        names: Vec<(Self::Str, Self::Sort)>,
+        body: Self::Term,
+    ) -> ParsingResult<Self::Term> {
+        Ok(command("lambda", [vars_to_sexpr(names), body]))
+    }
+
+    fn on_term_exists(
+        &mut self,
+        _range: Range,
+        names: Vec<(Self::Str, Self::Sort)>,
+        body: Self::Term,
+    ) -> ParsingResult<Self::Term> {
+        Ok(command("exists", [vars_to_sexpr(names), body]))
+    }
+
+    fn on_term_forall(
+        &mut self,
+        _range: Range,
+        names: Vec<(Self::Str, Self::Sort)>,
+        body: Self::Term,
+    ) -> ParsingResult<Self::Term> {
+        Ok(command("forall", [vars_to_sexpr(names), body]))
+    }
+
+    fn on_term_match(
+        &mut self,
+        _range: Range,
+        scrutinee: Self::Term,
+        cases: Vec<(Pattern<Self::Str>, Self::Term)>,
+    ) -> ParsingResult<Self::Term> {
+        let case_exprs = cases.into_iter().map(|(_, body)| body);
+        Ok(command("match", [scrutinee, sexpr_list(case_exprs)]))
+    }
+
+    fn on_term_annotated(
+        &mut self,
+        _range: Range,
+        t: Self::Term,
+        attributes: Vec<Self::Attribute>,
+    ) -> ParsingResult<Self::Term> {
+        let mut items = vec![sexpr_atom("!"), t];
+        for attribute in attributes {
+            match attribute {
+                SExpr::List(values) => items.extend(values),
+                atom @ SExpr::Atom(_) => items.push(atom),
+            }
+        }
+        Ok(sexpr_list(items))
+    }
+}
+
+impl ParsingAction for SExprAction {
+    type Command = SExpr;
+
+    fn on_command_assert(&mut self, _range: Range, t: Self::Term) -> ParsingResult<Self::Command> {
+        Ok(command("assert", [t]))
+    }
+
+    fn on_command_check_sat(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("check-sat", []))
+    }
+
+    fn on_command_check_sat_assuming(
+        &mut self,
+        _range: Range,
+        terms: Vec<Self::Term>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("check-sat-assuming", [sexpr_list(terms)]))
+    }
+
+    fn on_command_declare_const(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        sort: Self::Sort,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("declare-const", [sexpr_atom(name), sort]))
+    }
+
+    fn on_command_declare_datatype(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        _datatype: DatatypeDec<Self::Str, Self::Sort>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("declare-datatype", [sexpr_atom(name)]))
+    }
+
+    fn on_command_declare_datatypes(
+        &mut self,
+        _range: Range,
+        _defs: Vec<DatatypeDef<Self::Str, Self::Sort>>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("declare-datatypes", []))
+    }
+
+    fn on_command_declare_fun(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        input_sorts: Vec<Self::Sort>,
+        out_sort: Self::Sort,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command(
+            "declare-fun",
+            [sexpr_atom(name), sexpr_list(input_sorts), out_sort],
+        ))
+    }
+
+    fn on_command_declare_sort(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        arity: UBig,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command(
+            "declare-sort",
+            [sexpr_atom(name), sexpr_atom(arity.to_string())],
+        ))
+    }
+
+    fn on_command_declare_sort_parameter(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("declare-sort-parameter", [sexpr_atom(name)]))
+    }
+
+    fn on_command_define_const(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        sort: Self::Sort,
+        term: Self::Term,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("define-const", [sexpr_atom(name), sort, term]))
+    }
+
+    fn on_command_define_fun(
+        &mut self,
+        _range: Range,
+        definition: FunctionDef<Self::Str, Self::Sort, Self::Term>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command(
+            "define-fun",
+            [
+                sexpr_atom(definition.name),
+                vars_to_sexpr(definition.vars),
+                definition.out_sort,
+                definition.body,
+            ],
+        ))
+    }
+
+    fn on_command_define_fun_rec(
+        &mut self,
+        _range: Range,
+        definition: FunctionDef<Self::Str, Self::Sort, Self::Term>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command(
+            "define-fun-rec",
+            [
+                sexpr_atom(definition.name),
+                vars_to_sexpr(definition.vars),
+                definition.out_sort,
+                definition.body,
+            ],
+        ))
+    }
+
+    fn on_command_define_funs_rec(
+        &mut self,
+        _range: Range,
+        _definitions: Vec<FunctionDef<Self::Str, Self::Sort, Self::Term>>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("define-funs-rec", []))
+    }
+
+    fn on_command_define_sort(
+        &mut self,
+        _range: Range,
+        name: Self::Str,
+        params: Vec<Self::Str>,
+        sort: Self::Sort,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command(
+            "define-sort",
+            [
+                sexpr_atom(name),
+                sexpr_list(params.into_iter().map(sexpr_atom)),
+                sort,
+            ],
+        ))
+    }
+
+    fn on_command_echo(&mut self, _range: Range, s: Self::Str) -> ParsingResult<Self::Command> {
+        Ok(command("echo", [sexpr_atom(s)]))
+    }
+
+    fn on_command_exit(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("exit", []))
+    }
+
+    fn on_command_get_assertions(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-assertions", []))
+    }
+
+    fn on_command_get_assignment(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-assignment", []))
+    }
+
+    fn on_command_get_info(&mut self, _range: Range, kw: Keyword) -> ParsingResult<Self::Command> {
+        Ok(command("get-info", [sexpr_atom(kw.to_string())]))
+    }
+
+    fn on_command_get_model(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-model", []))
+    }
+
+    fn on_command_get_option(
+        &mut self,
+        _range: Range,
+        kw: Keyword,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("get-option", [sexpr_atom(kw.to_string())]))
+    }
+
+    fn on_command_get_proof(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-proof", []))
+    }
+
+    fn on_command_get_unsat_assumptions(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-unsat-assumptions", []))
+    }
+
+    fn on_command_get_unsat_core(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("get-unsat-core", []))
+    }
+
+    fn on_command_get_value(
+        &mut self,
+        _range: Range,
+        ts: Vec<Self::Term>,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("get-value", [sexpr_list(ts)]))
+    }
+
+    fn on_command_pop(&mut self, _range: Range, lvl: UBig) -> ParsingResult<Self::Command> {
+        Ok(command("pop", [sexpr_atom(lvl.to_string())]))
+    }
+
+    fn on_command_push(&mut self, _range: Range, lvl: UBig) -> ParsingResult<Self::Command> {
+        Ok(command("push", [sexpr_atom(lvl.to_string())]))
+    }
+
+    fn on_command_reset(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("reset", []))
+    }
+
+    fn on_command_reset_assertions(&mut self, _range: Range) -> ParsingResult<Self::Command> {
+        Ok(command("reset-assertions", []))
+    }
+
+    fn on_command_set_info(
+        &mut self,
+        _range: Range,
+        attributes: Self::Attribute,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("set-info", [attributes]))
+    }
+
+    fn on_command_set_logic(
+        &mut self,
+        _range: Range,
+        logic: Self::Str,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("set-logic", [sexpr_atom(logic)]))
+    }
+
+    fn on_command_set_option(
+        &mut self,
+        _range: Range,
+        attribute: Self::Attribute,
+    ) -> ParsingResult<Self::Command> {
+        Ok(command("set-option", [attribute]))
     }
 }
