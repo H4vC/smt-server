@@ -46,15 +46,37 @@ def test_python_client_validates_width_and_sort():
         pass
 
 
+def test_python_wide_integer_constant_uses_blob_encoding_and_masks_to_width():
+    b = smt.Builder()
+    b.bv_const((1 << 80) | (1 << 64) | 3, 65)
+    expr = b.to_bytes()
+    assert int.from_bytes(expr[16:20], "little") == 9  # blob_len
+    assert int.from_bytes(expr[48:56], "little") == 9  # payload = blob ref (offset 0, len 9)
+    assert expr[-1] == 1  # only the 65th bit may remain in the final byte
+
+
 def test_python_response_parser():
     response = b"SMTR" + (7).to_bytes(4, "little") + bytes([smt.ERROR, smt.HAS_MESSAGE]) + (3).to_bytes(4, "little") + b"\0\0bad"
     parsed = smt.parse_response(response)
     assert parsed.request_id == 7
     assert parsed.status == smt.ERROR
     assert parsed.payload == b"bad"
+    assert parsed.message() == "bad"
+
+    scalar = (8).to_bytes(4, "little") + (1).to_bytes(4, "little") + b"*"
+    model_payload = (1).to_bytes(4, "little") + (0).to_bytes(4, "little") + scalar
+    model_response = smt.parse_response(b"SMTR" + (8).to_bytes(4, "little") + bytes([smt.SAT, smt.HAS_MODEL]) + len(model_payload).to_bytes(4, "little") + b"\0\0" + model_payload)
+    model = model_response.model()
+    assert model[0].node_ref == 0
+    assert model[0].value.width == 8
+    assert model[0].value.as_int() == 42
+
+    core_payload = (1).to_bytes(4, "little") + (2).to_bytes(4, "little") + b"a0"
+    assert smt.parse_core(core_payload) == ["a0"]
 
 
 if __name__ == "__main__":
     test_python_client_matches_simple_sat_golden_vector()
     test_python_client_validates_width_and_sort()
+    test_python_wide_integer_constant_uses_blob_encoding_and_masks_to_width()
     test_python_response_parser()

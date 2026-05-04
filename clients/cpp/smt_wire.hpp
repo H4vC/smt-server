@@ -44,6 +44,10 @@ inline void u64(std::vector<uint8_t>& out, uint64_t v) { for (int i = 0; i < 8; 
 struct Node { uint8_t tag, arity; uint16_t aux_hi; uint32_t width, aux_lo, children; uint64_t payload; };
 struct Assertion { uint32_t root; bool named; uint32_t name_offset, name_len; };
 struct Meta { bool is_bool; uint32_t width; };
+struct ScalarValue { uint32_t width; std::vector<uint8_t> bytes; };
+struct ModelEntry { uint32_t node_ref; ScalarValue value; };
+struct SimplifyResult { std::vector<uint8_t> expression; std::vector<uint32_t> assertion_roots; std::vector<std::pair<uint32_t,uint32_t>> named_assertion_refs; std::vector<uint32_t> assumption_roots; };
+struct OptimizationResult { ScalarValue optimum; bool has_model; std::vector<ModelEntry> model; };
 struct Response { uint32_t request_id; uint8_t status, flags; std::vector<uint8_t> payload; };
 
 class Builder {
@@ -67,13 +71,20 @@ public:
 
     uint32_t bv_const(uint64_t value, uint32_t width) {
         check_width(width);
-        if (width < 64) value &= ((uint64_t(1) << width) - 1);
-        return add(tag::BV_CONST, width, {}, 0, 0, value);
+        if (width <= 64) {
+            if (width < 64) value &= ((uint64_t(1) << width) - 1);
+            return add(tag::BV_CONST, width, {}, 0, 0, value);
+        }
+        std::vector<uint8_t> bytes(bytes_for_width(width), 0);
+        for (size_t i = 0; i < 8; ++i) bytes[i] = uint8_t(value >> (8 * i));
+        return bv_const_wide(bytes, width);
     }
     uint32_t bv_const_wide(const std::vector<uint8_t>& bytes, uint32_t width) {
         if (bytes.size() != bytes_for_width(width)) throw std::invalid_argument("wide constant length mismatch");
-        if (width <= 64) { uint64_t v = 0; for (size_t i = 0; i < bytes.size(); ++i) v |= uint64_t(bytes[i]) << (8 * i); return bv_const(v, width); }
-        auto b = add_blob(bytes); return add(tag::BV_CONST, width, {}, 0, 0, blob_payload(b.first, b.second));
+        std::vector<uint8_t> normalized = bytes;
+        if (width % 8 != 0 && !normalized.empty()) normalized.back() &= uint8_t((1u << (width % 8)) - 1u);
+        if (width <= 64) { uint64_t v = 0; for (size_t i = 0; i < normalized.size(); ++i) v |= uint64_t(normalized[i]) << (8 * i); return bv_const(v, width); }
+        auto b = add_blob(normalized); return add(tag::BV_CONST, width, {}, 0, 0, blob_payload(b.first, b.second));
     }
 
     uint32_t bv_not(uint32_t x) { return bv_unary(tag::BV_NOT, x); }
@@ -165,7 +176,14 @@ private:
 };
 
 inline std::vector<uint8_t> frame(const std::vector<uint8_t>& payload) { std::vector<uint8_t> out; u32(out, uint32_t(payload.size())); out.insert(out.end(), payload.begin(), payload.end()); return out; }
+inline uint16_t read_u16(const std::vector<uint8_t>& data, size_t off) { if (off + 2 > data.size()) throw std::invalid_argument("short u16"); return uint16_t(data[off]) | (uint16_t(data[off+1]) << 8); }
 inline uint32_t read_u32(const std::vector<uint8_t>& data, size_t off) { if (off + 4 > data.size()) throw std::invalid_argument("short u32"); return uint32_t(data[off]) | (uint32_t(data[off+1]) << 8) | (uint32_t(data[off+2]) << 16) | (uint32_t(data[off+3]) << 24); }
+inline void require_bytes(const std::vector<uint8_t>& data, size_t off, size_t len, const char* what) { if (off > data.size() || len > data.size() - off) throw std::invalid_argument(what); }
+inline ScalarValue parse_scalar_value(const std::vector<uint8_t>& data, size_t& off) { require_bytes(data, off, 8, "short scalar"); uint32_t width = read_u32(data, off); uint32_t len = read_u32(data, off + 4); off += 8; require_bytes(data, off, len, "short scalar value"); ScalarValue value{width, std::vector<uint8_t>(data.begin() + off, data.begin() + off + len)}; off += len; if (width == 0) { if (len != 1 || (value.bytes[0] != 0 && value.bytes[0] != 1)) throw std::invalid_argument("bad Bool scalar"); } else { uint32_t expected = bytes_for_width(width); if (len != expected) throw std::invalid_argument("bad BV scalar length"); uint32_t valid = width % 8; if (valid != 0 && !value.bytes.empty() && (value.bytes.back() & ~uint8_t((1u << valid) - 1u)) != 0) throw std::invalid_argument("bad BV scalar high bits"); } return value; }
+inline std::vector<ModelEntry> parse_model_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 4, "short model"); uint32_t count = read_u32(payload, 0); size_t off = 4; std::vector<ModelEntry> entries; entries.reserve(count); for (uint32_t i = 0; i < count; ++i) { require_bytes(payload, off, 4, "short model entry"); uint32_t ref = read_u32(payload, off); off += 4; entries.push_back({ref, parse_scalar_value(payload, off)}); } if (off != payload.size()) throw std::invalid_argument("trailing model bytes"); return entries; }
+inline std::vector<std::string> parse_core_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 4, "short core"); uint32_t count = read_u32(payload, 0); size_t off = 4; std::vector<std::string> names; names.reserve(count); for (uint32_t i = 0; i < count; ++i) { require_bytes(payload, off, 4, "short core name length"); uint32_t len = read_u32(payload, off); off += 4; require_bytes(payload, off, len, "short core name"); names.emplace_back(payload.begin() + off, payload.begin() + off + len); off += len; } if (off != payload.size()) throw std::invalid_argument("trailing core bytes"); return names; }
+inline SimplifyResult parse_simplify_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 12, "short simplify"); uint32_t expr_len = read_u32(payload, 0); uint16_t assertion_count = read_u16(payload, 4); uint16_t named_count = read_u16(payload, 6); uint16_t assumption_count = read_u16(payload, 8); if (named_count > assertion_count) throw std::invalid_argument("bad simplify named_count"); size_t off = 12; require_bytes(payload, off, expr_len, "short simplify expression"); SimplifyResult result; result.expression.assign(payload.begin() + off, payload.begin() + off + expr_len); off += expr_len; for (uint16_t i = 0; i < assertion_count; ++i) { result.assertion_roots.push_back(read_u32(payload, off)); off += 4; } for (uint16_t i = 0; i < named_count; ++i) { uint32_t name_off = read_u32(payload, off); uint32_t name_len = read_u32(payload, off + 4); off += 8; result.named_assertion_refs.push_back({name_off, name_len}); } for (uint16_t i = 0; i < assumption_count; ++i) { result.assumption_roots.push_back(read_u32(payload, off)); off += 4; } if (off != payload.size()) throw std::invalid_argument("trailing simplify bytes"); return result; }
+inline OptimizationResult parse_optimization_payload(const std::vector<uint8_t>& payload, bool has_model) { size_t off = 0; OptimizationResult result{parse_scalar_value(payload, off), has_model, {}}; if (has_model) { std::vector<uint8_t> rest(payload.begin() + off, payload.end()); result.model = parse_model_payload(rest); off = payload.size(); } if (off != payload.size()) throw std::invalid_argument("trailing optimization bytes"); return result; }
 inline Response parse_response(const std::vector<uint8_t>& data) { if (data.size() < 16 || data[0] != 'S' || data[1] != 'M' || data[2] != 'T' || data[3] != 'R') throw std::invalid_argument("bad response"); uint32_t len = read_u32(data, 10); if (data.size() != 16u + len) throw std::invalid_argument("response length mismatch"); return {read_u32(data, 4), data[8], data[9], std::vector<uint8_t>(data.begin() + 16, data.end())}; }
 
 } // namespace smt_wire

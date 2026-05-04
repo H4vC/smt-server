@@ -24,9 +24,34 @@ int main() {
     assert(minimize[8] == smt_wire::command::MINIMIZE);
     auto rotated = b.bv_rotate_left(x, 3);
     assert(!smt_wire::is_bool_ref(rotated));
+    smt_wire::Builder wide;
+    wide.bv_const((uint64_t(1) << 63) | 3u, 65);
+    auto wide_expr = wide.to_bytes();
+    assert(smt_wire::read_u32(wide_expr, 16) == 9); // blob_len
+    assert(smt_wire::read_u32(wide_expr, 48) == 9); // payload = blob ref (offset 0, len 9)
+    std::vector<uint8_t> raw_wide(9, 0xff);
+    smt_wire::Builder masked;
+    masked.bv_const_wide(raw_wide, 65);
+    auto masked_expr = masked.to_bytes();
+    assert(masked_expr.back() == 1);
     std::vector<uint8_t> response = {'S','M','T','R', 7,0,0,0, smt_wire::status::ERROR, smt_wire::response_flags::HAS_MESSAGE, 3,0,0,0, 0,0, 'b','a','d'};
     auto parsed = smt_wire::parse_response(response);
     assert(parsed.request_id == 7 && parsed.status == smt_wire::status::ERROR && parsed.payload.size() == 3);
+    std::vector<uint8_t> model_payload;
+    smt_wire::u32(model_payload, 1);
+    smt_wire::u32(model_payload, x);
+    smt_wire::u32(model_payload, 8);
+    smt_wire::u32(model_payload, 1);
+    model_payload.push_back(42);
+    auto model = smt_wire::parse_model_payload(model_payload);
+    assert(model.size() == 1 && model[0].node_ref == x && model[0].value.bytes[0] == 42);
+    std::vector<uint8_t> core_payload;
+    smt_wire::u32(core_payload, 1);
+    smt_wire::u32(core_payload, 2);
+    core_payload.push_back('a');
+    core_payload.push_back('0');
+    auto core = smt_wire::parse_core_payload(core_payload);
+    assert(core.size() == 1 && core[0] == "a0");
     bool threw = false;
     try { (void)b.bv_add(x, b.bv_var("y", 16)); } catch (const std::invalid_argument&) { threw = true; }
     assert(threw);

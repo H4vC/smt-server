@@ -128,11 +128,60 @@ class Node:
 
 
 @dataclass(frozen=True)
+class ScalarValue:
+    width: int
+    bytes: bytes
+
+    def as_bool(self) -> bool:
+        if self.width != 0 or len(self.bytes) != 1:
+            raise ValueError("scalar is not Bool")
+        return self.bytes[0] != 0
+
+    def as_int(self) -> int:
+        return int.from_bytes(self.bytes, "little")
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    node_ref: int
+    value: ScalarValue
+
+
+@dataclass(frozen=True)
+class SimplifyResult:
+    expression: bytes
+    assertion_roots: list[int]
+    named_assertion_refs: list[tuple[int, int]]
+    assumption_roots: list[int]
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    optimum: ScalarValue
+    model: Optional[list[ModelEntry]] = None
+
+
+@dataclass(frozen=True)
 class Response:
     request_id: int
     status: int
     flags: int
     payload: bytes
+
+    def message(self) -> str:
+        return self.payload.decode("utf-8")
+
+    def model(self) -> list[ModelEntry]:
+        return parse_model(self.payload)
+
+    def core(self) -> list[str]:
+        return parse_core(self.payload)
+
+    def simplified(self) -> SimplifyResult:
+        return parse_simplify(self.payload)
+
+    def optimization(self) -> OptimizationResult:
+        return parse_optimization(self.payload, bool(self.flags & HAS_MODEL))
 
 
 class Builder:
@@ -215,7 +264,8 @@ class Builder:
         if width <= 64:
             payload = value & ((1 << width) - 1 if width < 64 else (1 << 64) - 1)
             return self._push(BV_CONST, width, payload=payload)
-        data = int(value).to_bytes(bytes_for_width(width), "little", signed=False)
+        masked = int(value) & ((1 << width) - 1)
+        data = masked.to_bytes(bytes_for_width(width), "little", signed=False)
         return self.bv_const_wide(data, width)
 
     def bv_const_wide(self, data: bytes, width: int) -> int:
@@ -461,6 +511,100 @@ def parse_response(data: bytes) -> Response:
     if len(data) != 16 + payload_len:
         raise ValueError("response length mismatch")
     return Response(request_id, status, flags, data[16:])
+
+
+def _need(data: bytes, offset: int, length: int, context: str) -> None:
+    if offset + length > len(data):
+        raise ValueError(f"short {context}")
+
+
+def parse_scalar(data: bytes, offset: int = 0) -> tuple[ScalarValue, int]:
+    _need(data, offset, 8, "scalar header")
+    width, value_len = struct.unpack_from("<II", data, offset)
+    offset += 8
+    _need(data, offset, value_len, "scalar value")
+    raw = bytes(data[offset:offset + value_len])
+    offset += value_len
+    if width == 0:
+        if value_len != 1 or raw[0] not in (0, 1):
+            raise ValueError("invalid Bool scalar")
+    else:
+        expected = bytes_for_width(width)
+        if value_len != expected:
+            raise ValueError("invalid BV scalar length")
+        valid = width % 8
+        if valid and raw and (raw[-1] & ~((1 << valid) - 1)):
+            raise ValueError("unused high bits are set in BV scalar")
+    return ScalarValue(width, raw), offset
+
+
+def parse_model(payload: bytes) -> list[ModelEntry]:
+    _need(payload, 0, 4, "model header")
+    count, = struct.unpack_from("<I", payload, 0)
+    offset = 4
+    entries: list[ModelEntry] = []
+    for _ in range(count):
+        _need(payload, offset, 4, "model node_ref")
+        node_ref, = struct.unpack_from("<I", payload, offset)
+        offset += 4
+        value, offset = parse_scalar(payload, offset)
+        entries.append(ModelEntry(node_ref, value))
+    if offset != len(payload):
+        raise ValueError("trailing bytes in model block")
+    return entries
+
+
+def parse_core(payload: bytes) -> list[str]:
+    _need(payload, 0, 4, "unsat core header")
+    count, = struct.unpack_from("<I", payload, 0)
+    offset = 4
+    names: list[str] = []
+    for _ in range(count):
+        _need(payload, offset, 4, "unsat core name length")
+        length, = struct.unpack_from("<I", payload, offset)
+        offset += 4
+        _need(payload, offset, length, "unsat core name")
+        names.append(payload[offset:offset + length].decode("utf-8"))
+        offset += length
+    if offset != len(payload):
+        raise ValueError("trailing bytes in unsat core block")
+    return names
+
+
+def parse_simplify(payload: bytes) -> SimplifyResult:
+    _need(payload, 0, 12, "simplify header")
+    expr_len, assertion_count, named_count, assumption_count, _reserved = struct.unpack_from("<IHHHH", payload, 0)
+    if named_count > assertion_count:
+        raise ValueError("named_count exceeds assertion_count")
+    offset = 12
+    _need(payload, offset, expr_len, "simplify expression")
+    expression = bytes(payload[offset:offset + expr_len])
+    offset += expr_len
+    _need(payload, offset, assertion_count * 4, "simplify assertion roots")
+    assertion_roots = list(struct.unpack_from(f"<{assertion_count}I", payload, offset)) if assertion_count else []
+    offset += assertion_count * 4
+    named_assertion_refs: list[tuple[int, int]] = []
+    for _ in range(named_count):
+        _need(payload, offset, 8, "simplify named ref")
+        named_assertion_refs.append(struct.unpack_from("<II", payload, offset))
+        offset += 8
+    _need(payload, offset, assumption_count * 4, "simplify assumption roots")
+    assumption_roots = list(struct.unpack_from(f"<{assumption_count}I", payload, offset)) if assumption_count else []
+    offset += assumption_count * 4
+    if offset != len(payload):
+        raise ValueError("trailing bytes in simplify block")
+    return SimplifyResult(expression, assertion_roots, named_assertion_refs, assumption_roots)
+
+
+def parse_optimization(payload: bytes, has_model: bool = False) -> OptimizationResult:
+    optimum, offset = parse_scalar(payload, 0)
+    model = None
+    if has_model:
+        model = parse_model(payload[offset:])
+        offset = len(payload)
+    if offset != len(payload):
+        raise ValueError("trailing bytes in optimization block")
+    return OptimizationResult(optimum, model)
 
 
 def frame(payload: bytes) -> bytes:
