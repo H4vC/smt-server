@@ -6,8 +6,8 @@ The project provides:
 
 - a TCP server that accepts either the project binary wire format or SMT-LIB text frames
 - native solver backends using the Rust `z3` crate and `binbit`, raced by default
-- a Rust wire-format crate (`smt-wire`)
-- single-file Python and C++ client helpers for building requests and decoding responses
+- a Rust wire-format crate (`smt-wire`) with a blocking TCP client
+- single-file Python and C++ client helpers for building requests, sending them, and decoding responses
 
 The supported logic is intentionally focused on quantifier-free bit-vectors and Booleans (`QF_BV`).
 SMT-LIB input is a compatibility frontend: it is parsed, lowered into the internal wire IR, and then sent to the configured backends.
@@ -44,31 +44,15 @@ The Python client is a dependency-free single file at `clients/python/smt_wire.p
 You can copy it into your project or add `clients/python` to `PYTHONPATH`.
 
 ```python
-import socket
-import struct
 import smt_wire as smt
-
-
-def recv_exact(sock, n):
-    chunks = []
-    while n:
-        chunk = sock.recv(n)
-        if not chunk:
-            raise EOFError("connection closed")
-        chunks.append(chunk)
-        n -= len(chunk)
-    return b"".join(chunks)
-
 
 b = smt.Builder()
 x = b.bv_var("x", 8)
 b.assert_(b.bv_eq(x, b.bv_const(42, 8)))
 request = b.build_solve_request(1, want_model=True)
 
-with socket.create_connection(("127.0.0.1", 9123)) as sock:
-    sock.sendall(smt.frame(request))
-    (n,) = struct.unpack("<I", recv_exact(sock, 4))
-    response = smt.parse_response(recv_exact(sock, n))
+with smt.TcpClient("127.0.0.1", 9123) as client:
+    response = client.send_request(request)
 
 print(response.status)       # smt.SAT
 print(response.model()[0])
@@ -88,6 +72,30 @@ You can also send an SMT-LIB script as the frame payload:
 
 The text frontend supports the project’s `QF_BV`/Bool subset, including declarations, assertions, named assertions, `check-sat`, `check-sat-assuming`, `get-model`, `get-value`, `get-unsat-core`, `let`, and common bit-vector operations. It does not provide a stateful incremental SMT-LIB session; commands such as `push` and `pop` are rejected.
 
+From Python, send text with the same client:
+
+```python
+with smt.TcpClient("127.0.0.1", 9123) as client:
+    print(client.send_text(script))
+```
+
+## Rust client
+
+```rust
+use smt_wire::{ExprBuilder, TcpClient};
+
+let mut b = ExprBuilder::new();
+let x = b.bv_var("x", 8).unwrap();
+let c = b.bv_const(42, 8).unwrap();
+let eq = b.bv_eq(x, c).unwrap();
+b.assert(eq).unwrap();
+let request = b.build_solve_request(1, 0, true, false).unwrap();
+
+let mut client = TcpClient::connect("127.0.0.1:9123").unwrap();
+let response = client.send_binary_request(&request).unwrap();
+println!("{:?}", response.envelope.status);
+```
+
 ## C++ client
 
 The C++ client helper is a dependency-free C++17 header:
@@ -99,10 +107,12 @@ smt_wire::Builder b;
 auto x = b.bv_var("x", 8);
 b.assert_(b.bv_eq(x, b.bv_const(42, 8)));
 auto request = b.build_solve_request(1, 0, true, false);
-auto frame = smt_wire::frame(request);
+
+smt_wire::TcpClient client("127.0.0.1", 9123);
+auto response = client.send_request(request);
 ```
 
-Networking is left to the application; send `frame` to the TCP server and parse the returned payload with `smt_wire::parse_response`.
+On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` if you use `TcpClient`.
 
 ## Test
 
@@ -110,10 +120,10 @@ Networking is left to the application; send `frame` to the TCP server and parse 
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 python clients/tests/test_python_client.py
-python clients/tests/test_live_server.py
+python clients/tests/test_live_server.py   # also exercises the live C++ TCP client when a compiler is available
 ```
 
-A C++ smoke test is also available:
+A standalone C++ smoke test is also available:
 
 ```sh
 c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_client_smoke
