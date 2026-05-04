@@ -1,0 +1,148 @@
+#pragma once
+// Single-file C++17 builder for the SMT v1 wire format.
+// No networking and no dependencies beyond the C++ standard library.
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace smt_wire {
+
+constexpr uint32_t BOOL_BIT = 0x80000000u;
+constexpr uint32_t INDEX_MASK = 0x7fffffffu;
+constexpr uint32_t MAX_WIDTH = 65536u;
+
+namespace tag {
+constexpr uint8_t BV_VAR = 0, BV_CONST = 1, BV_NOT = 2, BV_NEG = 3, BV_AND = 4, BV_OR = 5;
+constexpr uint8_t BV_XOR = 6, BV_ADD = 7, BV_SUB = 8, BV_MUL = 9, BV_UDIV = 10, BV_UREM = 11;
+constexpr uint8_t BV_SDIV = 12, BV_SREM = 13, BV_SMOD = 14, BV_SHL = 15, BV_LSHR = 16, BV_ASHR = 17;
+constexpr uint8_t BV_EXTRACT = 18, BV_CONCAT = 19, BV_ZEXT = 20, BV_SEXT = 21, BV_ITE = 22, BV_SELECT = 23;
+constexpr uint8_t BOOL_TRUE = 24, BOOL_FALSE = 25, BOOL_VAR = 26, BOOL_NOT = 27, BOOL_AND = 28, BOOL_OR = 29, BOOL_IMPLIES = 30;
+constexpr uint8_t BV_EQ = 31, BV_ULT = 32, BV_ULE = 33, BV_SLT = 34, BV_SLE = 35;
+constexpr uint8_t UADD_OVF = 36, SADD_OVF = 37, USUB_OVF = 38, SSUB_OVF = 39, UMUL_OVF = 40, SMUL_OVF = 41, NEG_OVF = 42, SDIV_OVF = 43;
+} // namespace tag
+
+namespace command { constexpr uint8_t SOLVE = 0, SIMPLIFY = 1, MINIMIZE = 2, MAXIMIZE = 3; }
+namespace request_flags { constexpr uint8_t WANT_MODEL = 1u << 0, WANT_CORE = 1u << 1, SIGNED = 1u << 2; }
+namespace status { constexpr uint8_t OK = 0, SAT = 1, UNSAT = 2, UNKNOWN = 3, ERROR = 4; }
+namespace response_flags { constexpr uint8_t HAS_MODEL = 1u << 0, HAS_CORE = 1u << 1, HAS_EXPR = 1u << 2, HAS_VALUE = 1u << 3, HAS_MESSAGE = 1u << 4; }
+
+inline uint32_t bv_ref(uint32_t index) { if (index > INDEX_MASK) throw std::invalid_argument("node index out of range"); return index; }
+inline uint32_t bool_ref(uint32_t index) { if (index > INDEX_MASK) throw std::invalid_argument("node index out of range"); return BOOL_BIT | index; }
+inline uint32_t ref_index(uint32_t ref) { return ref & INDEX_MASK; }
+inline bool is_bool_ref(uint32_t ref) { return (ref & BOOL_BIT) != 0; }
+inline uint64_t blob_payload(uint32_t offset, uint32_t len) { return (static_cast<uint64_t>(offset) << 32) | len; }
+inline uint32_t bytes_for_width(uint32_t width) { if (width == 0 || width > MAX_WIDTH) throw std::invalid_argument("invalid width"); return (width + 7) / 8; }
+
+inline void u8(std::vector<uint8_t>& out, uint8_t v) { out.push_back(v); }
+inline void u16(std::vector<uint8_t>& out, uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); }
+inline void u32(std::vector<uint8_t>& out, uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); }
+inline void u64(std::vector<uint8_t>& out, uint64_t v) { for (int i = 0; i < 8; ++i) out.push_back(uint8_t(v >> (8 * i))); }
+
+struct Node { uint8_t tag, arity; uint16_t aux_hi; uint32_t width, aux_lo, children; uint64_t payload; };
+struct Assertion { uint32_t root; bool named; uint32_t name_offset, name_len; };
+struct Meta { bool is_bool; uint32_t width; };
+
+class Builder {
+public:
+    std::vector<Node> nodes;
+    std::vector<uint32_t> children;
+    std::vector<uint8_t> blob;
+    std::vector<Meta> meta;
+    std::vector<Assertion> assertions;
+    std::vector<uint32_t> assumptions;
+    std::vector<size_t> scopes;
+
+    void reset() { *this = Builder(); }
+    void push() { scopes.push_back(assertions.size()); }
+    void pop() { if (scopes.empty()) throw std::invalid_argument("pop without push"); assertions.resize(scopes.back()); scopes.pop_back(); }
+
+    uint32_t bv_var(const std::string& name, uint32_t width) { check_width(width); auto b = add_blob(name); return add(tag::BV_VAR, width, {}, 0, 0, blob_payload(b.first, b.second)); }
+    uint32_t bool_var(const std::string& name) { auto b = add_blob(name); return add(tag::BOOL_VAR, 0, {}, 0, 0, blob_payload(b.first, b.second)); }
+    uint32_t bool_true() { return add(tag::BOOL_TRUE, 0); }
+    uint32_t bool_false() { return add(tag::BOOL_FALSE, 0); }
+
+    uint32_t bv_const(uint64_t value, uint32_t width) {
+        check_width(width);
+        if (width < 64) value &= ((uint64_t(1) << width) - 1);
+        return add(tag::BV_CONST, width, {}, 0, 0, value);
+    }
+    uint32_t bv_const_wide(const std::vector<uint8_t>& bytes, uint32_t width) {
+        if (bytes.size() != bytes_for_width(width)) throw std::invalid_argument("wide constant length mismatch");
+        if (width <= 64) { uint64_t v = 0; for (size_t i = 0; i < bytes.size(); ++i) v |= uint64_t(bytes[i]) << (8 * i); return bv_const(v, width); }
+        auto b = add_blob(bytes); return add(tag::BV_CONST, width, {}, 0, 0, blob_payload(b.first, b.second));
+    }
+
+    uint32_t bv_not(uint32_t x) { return bv_unary(tag::BV_NOT, x); }
+    uint32_t bv_neg(uint32_t x) { return bv_unary(tag::BV_NEG, x); }
+    uint32_t bv_and(uint32_t a, uint32_t b) { return bv_binary(tag::BV_AND, a, b); }
+    uint32_t bv_or(uint32_t a, uint32_t b) { return bv_binary(tag::BV_OR, a, b); }
+    uint32_t bv_xor(uint32_t a, uint32_t b) { return bv_binary(tag::BV_XOR, a, b); }
+    uint32_t bv_add(uint32_t a, uint32_t b) { return bv_binary(tag::BV_ADD, a, b); }
+    uint32_t bv_sub(uint32_t a, uint32_t b) { return bv_binary(tag::BV_SUB, a, b); }
+    uint32_t bv_mul(uint32_t a, uint32_t b) { return bv_binary(tag::BV_MUL, a, b); }
+    uint32_t bv_udiv(uint32_t a, uint32_t b) { return bv_binary(tag::BV_UDIV, a, b); }
+    uint32_t bv_urem(uint32_t a, uint32_t b) { return bv_binary(tag::BV_UREM, a, b); }
+    uint32_t bv_sdiv(uint32_t a, uint32_t b) { return bv_binary(tag::BV_SDIV, a, b); }
+    uint32_t bv_srem(uint32_t a, uint32_t b) { return bv_binary(tag::BV_SREM, a, b); }
+    uint32_t bv_smod(uint32_t a, uint32_t b) { return bv_binary(tag::BV_SMOD, a, b); }
+    uint32_t bv_shl(uint32_t a, uint32_t b) { return bv_binary(tag::BV_SHL, a, b); }
+    uint32_t bv_lshr(uint32_t a, uint32_t b) { return bv_binary(tag::BV_LSHR, a, b); }
+    uint32_t bv_ashr(uint32_t a, uint32_t b) { return bv_binary(tag::BV_ASHR, a, b); }
+
+    uint32_t bv_extract(uint32_t x, uint32_t hi, uint32_t lo) { uint32_t w = expect_bv(x); if (lo > hi || hi >= w || hi > 0xffff) throw std::invalid_argument("bad extract"); return add(tag::BV_EXTRACT, hi - lo + 1, {x}, uint16_t(hi), lo); }
+    uint32_t bv_concat(uint32_t a, uint32_t b) { uint32_t w = expect_bv(a) + expect_bv(b); check_width(w); return add(tag::BV_CONCAT, w, {a, b}); }
+    uint32_t bv_zext(uint32_t x, uint16_t amount) { return bv_ext(tag::BV_ZEXT, x, amount); }
+    uint32_t bv_sext(uint32_t x, uint16_t amount) { return bv_ext(tag::BV_SEXT, x, amount); }
+    uint32_t bv_ite(uint32_t c, uint32_t t, uint32_t e) { expect_bool(c); return add(tag::BV_ITE, same_bv(t, e), {c, t, e}); }
+
+    uint32_t bool_not(uint32_t x) { expect_bool(x); return add(tag::BOOL_NOT, 0, {x}); }
+    uint32_t bool_and(uint32_t a, uint32_t b) { return bool_binary(tag::BOOL_AND, a, b); }
+    uint32_t bool_or(uint32_t a, uint32_t b) { return bool_binary(tag::BOOL_OR, a, b); }
+    uint32_t bool_implies(uint32_t a, uint32_t b) { return bool_binary(tag::BOOL_IMPLIES, a, b); }
+
+    uint32_t bv_eq(uint32_t a, uint32_t b) { return bv_cmp(tag::BV_EQ, a, b); }
+    uint32_t bv_ult(uint32_t a, uint32_t b) { return bv_cmp(tag::BV_ULT, a, b); }
+    uint32_t bv_ule(uint32_t a, uint32_t b) { return bv_cmp(tag::BV_ULE, a, b); }
+    uint32_t bv_slt(uint32_t a, uint32_t b) { return bv_cmp(tag::BV_SLT, a, b); }
+    uint32_t bv_sle(uint32_t a, uint32_t b) { return bv_cmp(tag::BV_SLE, a, b); }
+    uint32_t bv_ne(uint32_t a, uint32_t b) { return bool_not(bv_eq(a, b)); }
+    uint32_t bv_ugt(uint32_t a, uint32_t b) { return bv_ult(b, a); }
+    uint32_t bv_uge(uint32_t a, uint32_t b) { return bv_ule(b, a); }
+    uint32_t bv_sgt(uint32_t a, uint32_t b) { return bv_slt(b, a); }
+    uint32_t bv_sge(uint32_t a, uint32_t b) { return bv_sle(b, a); }
+    uint32_t bool_eq(uint32_t a, uint32_t b) { expect_bool(a); expect_bool(b); return bool_and(bool_or(a, bool_not(b)), bool_or(bool_not(a), b)); }
+    uint32_t bool_xor(uint32_t a, uint32_t b) { return bool_not(bool_eq(a, b)); }
+
+    void assert_(uint32_t root) { expect_bool(root); assertions.push_back({root, false, 0, 0}); }
+    void assert_named(const std::string& name, uint32_t root) { expect_bool(root); auto b = add_blob(name); assertions.push_back({root, true, b.first, b.second}); }
+    void assume(uint32_t root) { expect_bool(root); assumptions.push_back(root); }
+
+    std::vector<uint8_t> to_bytes() const { return expr_bytes(nodes, children, blob); }
+    std::vector<uint8_t> build_solve_request(uint32_t request_id, uint32_t budget_ms = 0, bool want_model = false, bool want_core = false) const { return build_request(request_id, command::SOLVE, (want_model ? request_flags::WANT_MODEL : 0) | (want_core ? request_flags::WANT_CORE : 0), budget_ms, 0, false); }
+
+private:
+    static void check_width(uint32_t w) { if (w == 0 || w > MAX_WIDTH) throw std::invalid_argument("invalid BV width"); }
+    bool tag_is_bool(uint8_t t) const { return t >= tag::BOOL_TRUE; }
+    std::pair<uint32_t,uint32_t> add_blob(const std::string& s) { return add_blob(std::vector<uint8_t>(s.begin(), s.end())); }
+    std::pair<uint32_t,uint32_t> add_blob(const std::vector<uint8_t>& data) { uint32_t off = uint32_t(blob.size()); blob.insert(blob.end(), data.begin(), data.end()); return {off, uint32_t(data.size())}; }
+    uint32_t add(uint8_t t, uint32_t width, std::vector<uint32_t> child_refs = {}, uint16_t aux_hi = 0, uint32_t aux_lo = 0, uint64_t payload = 0) { for (auto c : child_refs) meta_for(c); uint32_t start = child_refs.empty() ? 0 : uint32_t(children.size()); children.insert(children.end(), child_refs.begin(), child_refs.end()); uint32_t idx = uint32_t(nodes.size()); nodes.push_back({t, uint8_t(child_refs.size()), aux_hi, width, aux_lo, start, payload}); bool ib = tag_is_bool(t); meta.push_back({ib, width}); return ib ? bool_ref(idx) : bv_ref(idx); }
+    Meta meta_for(uint32_t ref) const { uint32_t idx = ref_index(ref); if (idx >= meta.size()) throw std::invalid_argument("bad node ref"); Meta m = meta[idx]; if (m.is_bool != is_bool_ref(ref)) throw std::invalid_argument("sort bit mismatch"); return m; }
+    uint32_t expect_bv(uint32_t r) const { Meta m = meta_for(r); if (m.is_bool) throw std::invalid_argument("expected BV"); return m.width; }
+    void expect_bool(uint32_t r) const { if (!meta_for(r).is_bool) throw std::invalid_argument("expected Bool"); }
+    uint32_t same_bv(uint32_t a, uint32_t b) const { uint32_t aw = expect_bv(a), bw = expect_bv(b); if (aw != bw) throw std::invalid_argument("BV width mismatch"); return aw; }
+    uint32_t bv_unary(uint8_t t, uint32_t x) { return add(t, expect_bv(x), {x}); }
+    uint32_t bv_binary(uint8_t t, uint32_t a, uint32_t b) { return add(t, same_bv(a,b), {a,b}); }
+    uint32_t bv_ext(uint8_t t, uint32_t x, uint16_t n) { uint32_t w = expect_bv(x) + n; check_width(w); return add(t, w, {x}, n); }
+    uint32_t bool_binary(uint8_t t, uint32_t a, uint32_t b) { expect_bool(a); expect_bool(b); return add(t, 0, {a,b}); }
+    uint32_t bv_cmp(uint8_t t, uint32_t a, uint32_t b) { same_bv(a,b); return add(t, 0, {a,b}); }
+
+    static std::vector<uint8_t> expr_bytes(const std::vector<Node>& ns, const std::vector<uint32_t>& cs, const std::vector<uint8_t>& bl) { std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T',0,1,0,0,0}); u32(out, uint32_t(ns.size())); u32(out, uint32_t(cs.size())); u32(out, uint32_t(bl.size())); for (int i=0;i<12;++i) u8(out,0); for (const auto& n: ns) { u8(out,n.tag); u8(out,n.arity); u16(out,n.aux_hi); u32(out,n.width); u32(out,n.aux_lo); u32(out,n.children); u64(out,n.payload); } for (auto c: cs) u32(out,c); out.insert(out.end(), bl.begin(), bl.end()); return out; }
+    std::vector<uint8_t> build_request(uint32_t request_id, uint8_t cmd, uint8_t flags, uint32_t budget, uint32_t target, bool has_target) const { auto expr = to_bytes(); std::vector<Assertion> named, unnamed; for (auto a: assertions) (a.named ? named : unnamed).push_back(a); std::vector<Assertion> ordered = named; ordered.insert(ordered.end(), unnamed.begin(), unnamed.end()); std::vector<uint8_t> out; out.insert(out.end(), {'S','M','T','Q'}); u32(out, request_id); u8(out, cmd); u8(out, flags); u32(out, budget); u32(out, uint32_t(expr.size())); u16(out, uint16_t(ordered.size())); u16(out, uint16_t(named.size())); u16(out, uint16_t(assumptions.size())); u32(out, has_target ? target : 0); u32(out, 0); out.insert(out.end(), expr.begin(), expr.end()); for (auto a: ordered) u32(out, a.root); for (auto a: named) { u32(out, a.name_offset); u32(out, a.name_len); } for (auto a: assumptions) u32(out, a); return out; }
+};
+
+inline std::vector<uint8_t> frame(const std::vector<uint8_t>& payload) { std::vector<uint8_t> out; u32(out, uint32_t(payload.size())); out.insert(out.end(), payload.begin(), payload.end()); return out; }
+
+} // namespace smt_wire
