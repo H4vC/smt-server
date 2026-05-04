@@ -1,0 +1,10 @@
+[package]
+name = "smt-wire"
+version = "0.1.0"
+edition = "2021"
+description = "Rust codecs, views, validation, and builders for the SMT v1 wire format"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "smt_wire"
+path = "src/lib.rs"

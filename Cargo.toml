@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/smt-wire"]
+resolver = "2"
