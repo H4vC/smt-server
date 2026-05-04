@@ -321,25 +321,22 @@ fn parse_atom_expr(
             sort: SmtSort::Bool,
         });
     }
-    if let Some((bits, radix)) = value
+    if let Some((digits, radix)) = value
         .strip_prefix("#b")
         .map(|s| (s, 2))
         .or_else(|| value.strip_prefix("#x").map(|s| (s, 16)))
     {
         let width = if radix == 2 {
-            bits.len() as u32
+            digits.len() as u32
         } else {
-            bits.len() as u32 * 4
+            digits.len() as u32 * 4
         };
-        let parsed = u128::from_str_radix(bits, radix)
-            .map_err(|_| WireError::invalid("bitvector literal", value.to_owned()))?;
+        let bytes = literal_bytes(digits, radix, width, value)?;
         let node = if width <= 64 {
-            state.builder.bv_const(parsed as u64, width)?
+            let mut raw = [0u8; 8];
+            raw[..bytes.len()].copy_from_slice(&bytes);
+            state.builder.bv_const(u64::from_le_bytes(raw), width)?
         } else {
-            let mut bytes = vec![0u8; (width as usize).div_ceil(8)];
-            for (index, byte) in bytes.iter_mut().enumerate().take(16) {
-                *byte = ((parsed >> (index * 8)) & 0xff) as u8;
-            }
             state.builder.bv_const_wide(&bytes, width)?
         };
         return Ok(Binding {
@@ -352,6 +349,45 @@ fn parse_atom_expr(
         .or_else(|| state.env.get(value))
         .cloned()
         .ok_or_else(|| WireError::invalid("SMT-LIB symbol", format!("undefined symbol {value:?}")))
+}
+
+fn literal_bytes(
+    digits: &str,
+    radix: u32,
+    width: u32,
+    original: &str,
+) -> smt_wire::Result<Vec<u8>> {
+    let mut bytes = vec![0u8; (width as usize).div_ceil(8)];
+    match radix {
+        2 => {
+            for (offset, ch) in digits.chars().rev().enumerate() {
+                match ch {
+                    '0' => {}
+                    '1' => bytes[offset / 8] |= 1 << (offset % 8),
+                    _ => {
+                        return Err(WireError::invalid(
+                            "bitvector literal",
+                            format!("invalid binary literal {original}"),
+                        ))
+                    }
+                }
+            }
+        }
+        16 => {
+            for (nibble, ch) in digits.chars().rev().enumerate() {
+                let value = ch.to_digit(16).ok_or_else(|| {
+                    WireError::invalid(
+                        "bitvector literal",
+                        format!("invalid hex literal {original}"),
+                    )
+                })? as u8;
+                let bit = nibble * 4;
+                bytes[bit / 8] |= value << (bit % 8);
+            }
+        }
+        _ => unreachable!("only binary and hex literals are passed"),
+    }
+    Ok(bytes)
 }
 
 fn parse_list_expr(

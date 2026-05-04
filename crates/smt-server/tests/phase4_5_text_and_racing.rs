@@ -64,6 +64,18 @@ fn smtlib_text_frontend_named_unsat_core() {
 }
 
 #[test]
+fn smtlib_parser_supports_wide_hex_literals() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 132))
+        (assert (= x #x100000000000000000000000000000000))
+        (check-sat)
+    "#;
+    let query = parse_smtlib_script(script).unwrap();
+    assert_eq!(query.request.assertion_roots.len(), 1);
+}
+
+#[test]
 fn smtlib_parser_supports_let_extract_and_assumptions() {
     let script = r#"
         (set-logic QF_BV)
