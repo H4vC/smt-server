@@ -42,7 +42,7 @@ The `qfbvsmtrs` crate should not depend on `smt-server`. It may optionally depen
 - Arrays (QF_ABV) — can be added later via read-over-write axioms
 - Floating point (QF_BVFP)
 - Quantifiers
-- Optimization / MaxSMT
+- General optimization / MaxSMT. If repository integration needs `minimize` / `maximize`, plan it separately as bounded repeated-SAT bit-hunt, not as full MaxSMT.
 - Uninterpreted functions (QF_UFBV)
 
 ### 1.3 Dependencies
@@ -55,7 +55,18 @@ The `qfbvsmtrs` crate should not depend on `smt-server`. It may optionally depen
 | `rustsat` (encodings) | Cardinality / PB encodings | Optional, useful if you need pseudo-Boolean constraints later |
 | `smt-wire` (optional feature) | Server wire bridge | Lets `smt-server` feed validated binary requests into the standalone crate without depending on `smt-server` |
 
-A secondary SAT backend (e.g. `splr`) should be easy to swap in behind a trait, which is also useful for differential testing. `qfbvsmtrs` should not depend on `smt-server`.
+A secondary SAT backend (for example `varisat` alongside default `splr`) should be easy to swap in behind a trait, which is also useful for differential testing. `qfbvsmtrs` should not depend on `smt-server`.
+
+### 1.4 Up-front feasibility and environment checks
+
+These checks are cheap enough to do before implementation and should shape the first design instead of being discovered late:
+
+- **SAT backend deadline audit:** inspect each candidate backend's public API and run a tiny timeout harness. If a backend cannot be interrupted or cannot honor a deadline, budgeted requests should return `Unknown` or select another backend rather than optimistically running past the caller's budget.
+- **SAT backend failure-mode audit:** wrap backend calls in a narrow adapter from day one. Panics, malformed CNF rejections, or solver-internal errors should become typed `Unknown`/backend errors at the solver boundary, never wrong conclusive answers.
+- **Z3 oracle availability:** run `z3 --version` during setup and record whether an external binary exists. If it does not, plan the Rust `z3` crate as the differential oracle and gate external-binary tests separately.
+- **Corpus size and family census:** before designing the runner, download/list the target SMT-LIB archive, count files, bytes, and top-level benchmark families. A 10k+ case corpus should be treated as an operational workload, not as a single unit test.
+- **Budget model:** distinguish solver-internal budgets from whole-process timeouts. Process time includes parse, frontend lowering, simplification, bit-blasting, CNF generation, SAT, model/core extraction, and OS scheduling delay.
+- **Production bar:** define up front whether the goal is a theoretically complete solver or a bounded production backend that may return documented `unknown` under resource limits.
 
 
 ## 2. Architecture
@@ -102,7 +113,7 @@ A secondary SAT backend (e.g. `splr`) should be easy to swap in behind a trait, 
                          ▼
 ┌─────────────────────────────────────────────────────┐
 │                SAT Solver Backend                   │
-│   varisat / rustsat-batsat / splr (behind trait)    │
+│   splr / varisat / internal DPLL (behind trait)     │
 └────────────────────────┬────────────────────────────┘
                          │
                          ▼
@@ -157,8 +168,9 @@ qfbv-solver/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── backend.rs     # trait SatBackend
+│   │       ├── splr.rs
 │   │       ├── varisat.rs
-│   │       └── batsat.rs
+│   │       └── dpll.rs
 │   │
 │   └── qfbv-solver/          # top-level orchestration + model extraction
 │       └── src/
@@ -296,7 +308,7 @@ Initial feature policy should be conservative:
 | `WANT_MODEL` | supported for SAT by reading primary-input assignments |
 | `assumption_roots` | supported by conjoining assumptions initially; later use SAT assumptions |
 | `WANT_CORE` | supported for named assertions via deletion-based unsat-core minimization |
-| `budget_ms != 0` | enforce with SAT timeout/time checks or return `Unknown`; do not silently exceed the requested budget |
+| `budget_ms != 0` | enforce with SAT timeout/time checks or return `Unknown`; do not silently exceed the requested budget; if the selected backend cannot be interrupted, return `Unknown` before starting that backend for budgeted requests |
 
 This phase reserves the standalone SMT-LIB API immediately. The implementation can be thin at first, but the crate ownership boundary should be clear: `qfbvsmtrs` owns its parser/IR/solver; `smt-server` only adapts wire requests and wire responses.
 
@@ -516,7 +528,7 @@ pub trait SatBackend {
 }
 ```
 
-Implement for `varisat::Solver` and/or `batsat::Solver`. The trait should include assumptions and a deadline from the start because `smt-server` has `assumption_roots` and `budget_ms` in every request.
+Implement for `splr` and `varisat`, plus a small internal DPLL solver for testing/truth-table validation. The trait should include assumptions and a deadline from the start because `smt-server` has `assumption_roots` and `budget_ms` in every request, but each backend adapter must truthfully report when those features are unsupported.
 
 **4.3.3 — Model Extraction (`qfbvsmtrs::model`)**
 
@@ -555,6 +567,14 @@ Evaluate any node whose children are all constants. E.g. `bvadd(#x0003, #x0001)`
 After simplification, run a reachability pass from assertion roots and drop unreferenced nodes.
 
 Implement as a fixpoint loop: apply all rules until no changes occur. Use a worklist for efficiency.
+
+**4.4.6 — Rewrite Safety Protocol**
+Every simplification should be justified by a local BV identity and covered by randomized/differential tests before it is enabled by default. In particular:
+
+- keep word-level rewrites in the sort-checked IR or gate layer where semantics are explicit;
+- test each rewrite on small exhaustive widths and random wider widths;
+- do not add CNF-level simplifications unless they are proof-obvious or independently checked, because CNF transformations can silently break conclusive soundness;
+- for any shortcut that returns `sat` before SAT solving, evaluate the original assertions under the candidate assignment and only use it when no model/core/optimization artifact is requested unless the artifact can be produced correctly.
 
 
 ### Phase 5: Polish + Incremental Solving (Weeks 11–14)
@@ -652,7 +672,7 @@ For each .smt2 file in test suite:
 2. **Hand-written regression tests** — edge cases you discover during development: zero-width extracts, division by zero, maximum-width shifts, sign extension of width-1, etc.
 3. **Fuzz-generated formulas** — see 5.5.
 
-**Z3 availability:** Differential tests require a `z3` binary on PATH. Gate these behind a cargo feature or environment variable (`DIFFERENTIAL_TESTS=1`) so CI can run them when z3 is installed, and they're skipped otherwise.
+**Z3 availability preflight:** Do not assume a `z3` binary is installed. During project setup, run `z3 --version` and record the result. If the binary is unavailable, use the Rust `z3` crate for differential smoke/random tests and keep external-binary tests gated behind a feature or environment variable (`DIFFERENTIAL_TESTS=1`). Corpus-scale differential tests should record which oracle path was used.
 
 ### 5.5 Layer 5 — Grammar-Based Fuzzing
 
@@ -702,6 +722,22 @@ Maintain a directory of `.smt2` files with known `sat` / `unsat` answers and (fo
 | 5. Fuzzing | Parser → IR → bit-blast → solve pipeline | `cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml` | Nightly / weekly |
 | 6. Known-answer | Regression suite | Fixed `.smt2` fixtures under `crates/qfbvsmtrs/tests/fixtures/known` plus inline edge cases | Every commit |
 
+### 5.8 Corpus-Scale Runner Planning
+
+A full SMT-LIB corpus is large enough that the runner should be designed as production tooling from the beginning:
+
+- write append-only JSONL records with path, expected status, observed result, elapsed time, byte size, and solver/backend configuration;
+- support merged latest-by-path baseline reports so solved cases are not rerun accidentally;
+- support `--rerun-kinds`, `--skip-kinds`, path filters, regex filters, and `--list-only` dry runs;
+- support improvement-only official reports (`--record-ok-only` / `--record-kinds ok`) without losing the ability to skip already-attempted slow cases; use a separate attempt log for every attempted result;
+- support exclusion reports for experiment logs that should not be folded into the official baseline;
+- support queue sorting by path, prior elapsed time, and file size so fast/slow batches can be segregated;
+- support per-file process timeout separately from solver budget, and a wall-clock cap that stops submitting new work while allowing running workers to finish under their process timeout;
+- record worker count and timeout choices, because high worker counts can make parse/load-heavy cases look like solver timeouts;
+- normalize path filters across Windows and Unix path spellings.
+
+These features are not solver logic, but without them corpus triage tends to repeat known-good or known-slow work and makes production-readiness evidence noisy.
+
 
 ## 6. Performance Considerations
 
@@ -718,7 +754,22 @@ Long division is the most expensive operation: O(n²) subtractors, each being an
 A rough budget: each full-adder produces 2 gates (sum, carry). An n-bit add is ~2n gates → ~2n CNF variables + ~6n clauses. A 32-bit formula with 10 additions and 2 multiplications might produce ~50k CNF variables and ~150k clauses — well within what modern SAT solvers handle in milliseconds.
 
 ### 6.5 SAT Solver Choice
-For the problem sizes typical in symbolic execution (thousands to low millions of CNF variables), all three pure-Rust solvers (varisat, batsat, splr) should be adequate. The SAT backend trait makes benchmarking trivial.
+For the problem sizes typical in symbolic execution (thousands to low millions of CNF variables), a pure-Rust CDCL solver should be adequate for many cases, but the choice should be based on an API and behavior audit, not only on advertised performance. Check deadline support, assumption support, model extraction, panic/error behavior, and licensing before declaring a production default. Keep a tiny internal DPLL backend for testing and truth-table validation even if it is not a production backend.
+
+### 6.6 Cheap Model-Free SAT Witnesses
+For model-free `check-sat` queries, it is reasonable to try a small number of deterministic candidate assignments before full SAT solving, especially all-zero/all-one and other cheap seeded assignments. This must be treated as an optimization, not a proof shortcut:
+
+- validate the candidate by evaluating the original assertions, not a partially simplified approximation;
+- disable the shortcut when a model, core, or optimization result is requested unless the requested artifact can be produced correctly;
+- keep the candidate count/resource cap documented so the shortcut cannot become an unbounded search.
+
+### 6.7 Solver Budget vs Process Timeout
+Budget enforcement should be layered:
+
+- parser/frontend/simplifier/bit-blaster phases should periodically check an overall deadline where practical;
+- SAT backends should receive their own interrupt/deadline only if the backend can honor it;
+- a process-level timeout remains the hard guardrail for corpus and production harnesses;
+- reports should distinguish `unknown` from solver budget exhaustion and process timeout from parse/load/SAT wall-clock exhaustion where possible.
 
 
 ## 7. Division-by-Zero Semantics
@@ -729,6 +780,20 @@ SMT-LIB defines specific results for division and remainder by zero:
 - `bvsdiv` and `bvsrem` follow from these via sign fixup
 
 The bit-blasting circuit for `bvudiv(a, b)` must handle this: when all bits of `b` are zero, force the quotient to all-ones and the remainder to `a`. Implement with a `b_is_zero` check (NOR of all b-bits) feeding a per-bit mux on the outputs.
+
+
+## 7.1 Production Readiness Criteria
+
+Before calling the backend production-complete, define and check the following evidence:
+
+- **Soundness evidence:** zero known wrong conclusive `sat`/`unsat` answers; model-producing paths validate returned models; core-producing paths either return valid cores or `Unknown`.
+- **Bounded behavior:** all public solve paths have documented deadline/timeout behavior; unsupported deadline combinations return `Unknown` rather than silently exceeding budgets.
+- **Scope clarity:** supported SMT-LIB and wire constructs are documented; unsupported arrays, floating point, quantifiers, and uninterpreted functions fail cleanly.
+- **Corpus evidence:** full-corpus reports are merged by path; remaining `unknown`/timeout cases are categorized, either solved or explicitly accepted as outside the production guarantee.
+- **Integration evidence:** `smt-server` racing handles qfbvsmtrs `sat`, `unsat`, `unknown`, timeout, model, core, and optimization responses without treating unknown as failure.
+- **Regression gates:** formatting, clippy, workspace tests, fuzz build/run, random circuit tests, differential tests, and corpus runner syntax all pass under recorded tool versions.
+
+This criterion is stricter than “implemented and tested on smoke cases” but still allows a bounded production backend to return documented `unknown` on hard workloads.
 
 
 ## 8. Milestones and Timeline
