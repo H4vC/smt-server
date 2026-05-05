@@ -4,12 +4,37 @@
 
 Build a pure-Rust SMT solver for the **QF_BV** (Quantifier-Free Bit-Vector) logic, targeting symbolic execution and program verification workloads. The solver will parse SMT-LIB 2.7 input using **yaspar**, bit-blast BV expressions into Boolean circuits, Tseitin-encode them into CNF, and solve using a pure-Rust SAT backend.
 
-### 1.1 Scope
+### 1.1 Repository Fit / Integration Review
+
+This plan was originally written as a greenfield standalone solver. That is still the right shape for **`qfbvsmtrs`**: it should be its own crate with its own public API, IR, SMT-LIB frontend, bit-blaster, CNF encoder, SAT abstraction, and model type. The repository integration should be an adapter around that crate, not an implementation buried inside `smt-server`.
+
+Repository facts that affect the integration:
+
+- The project already has a public, validated, topologically ordered expression IR in `crates/smt-wire` (`ExpressionBuffer`, `ExprView`, `RawNode`, `NodeRef`, and `Tag`).
+- The project already has an SMT-LIB text path in `crates/smt-server/src/smtlib.rs`, using `yaspar` and lowering scripts into `smt-wire` requests.
+- The project already has the server-level backend abstraction in `crates/smt-server/src/backend.rs` (`Backend::handle(&BinaryRequest) -> QueryResult`).
+- The project currently races `Z3Backend` and `BinbitBackend` in `crates/smt-server/src/main.rs`.
+
+Therefore the best design is a standalone crate plus two input bridges into the same solver core:
+
+```text
+Standalone use:
+  SMT-LIB / builder API → qfbvsmtrs IR → simplify → bit-blast → CNF → SAT → qfbvsmtrs model
+
+Server use:
+  smt_wire::BinaryRequest / ExprView → qfbvsmtrs IR → same solver core → qfbvsmtrs result
+  smt-server adapter converts qfbvsmtrs result → QueryResult / ModelBlock
+```
+
+The `qfbvsmtrs` crate should not depend on `smt-server`. It may optionally depend on `smt-wire` behind a feature (for example `wire`) so the server adapter can reuse a first-party conversion path without making the core solver server-specific.
+
+### 1.2 Scope
 
 **In scope (QF_BV core):**
-- Fixed-width bit-vector arithmetic (add, sub, mul, udiv, urem, sdiv, srem)
+- Fixed-width bit-vector arithmetic (add, sub, mul, udiv, urem, sdiv, srem, smod)
 - Bitwise operations (and, or, xor, not, shift, rotate)
-- Comparison (bvult, bvslt, bvuge, bvsge, equals)
+- Comparison (bvult, bvule, bvugt, bvuge, bvslt, bvsle, bvsgt, bvsge, equals)
+- Wire/server overflow predicates (`uaddo`, `saddo`, `usubo`, `ssubo`, `umulo`, `smulo`, `nego`, `sdivo`) or explicit unsupported handling until circuits land
 - Extraction, concatenation, zero/sign extension
 - Boolean connectives over BV predicates (and, or, not, implies, ite)
 
@@ -20,15 +45,16 @@ Build a pure-Rust SMT solver for the **QF_BV** (Quantifier-Free Bit-Vector) logi
 - Optimization / MaxSMT
 - Uninterpreted functions (QF_UFBV)
 
-### 1.2 Dependencies
+### 1.3 Dependencies
 
 | Crate | Role | Why this one |
 |---|---|---|
 | `yaspar` | SMT-LIB 2.7 parsing | Callback-based, no AST allocation unless you want it, SMT-LIB 2.7 compliant |
 | `varisat` *or* `rustsat` + `rustsat-batsat` | SAT backend | Pure Rust, cross-platform, no C/C++ toolchain required |
 | `rustsat` (encodings) | Cardinality / PB encodings | Optional, useful if you need pseudo-Boolean constraints later |
+| `smt-wire` (optional feature) | Server wire bridge | Lets `smt-server` feed validated binary requests into the standalone crate without depending on `smt-server` |
 
-A secondary SAT backend (e.g. `splr`) should be easy to swap in behind a trait, which is also useful for differential testing.
+A secondary SAT backend (e.g. `splr`) should be easy to swap in behind a trait, which is also useful for differential testing. `qfbvsmtrs` should not depend on `smt-server`.
 
 
 ## 2. Architecture
@@ -86,8 +112,12 @@ A secondary SAT backend (e.g. `splr`) should be easy to swap in behind a trait, 
 └─────────────────────────────────────────────────────┘
 ```
 
+For standalone use, all boxes live inside the `qfbvsmtrs` crate. For repository/server use, `smt-server` can bypass the crate's SMT-LIB parser and enter through a `smt-wire` bridge, but it should still land in the same `qfbvsmtrs` IR and solver pipeline. That keeps the crate independently usable while preventing two independent bit-blasters or SAT integrations.
+
 
 ## 3. Crate / Module Structure
+
+Original multi-crate split from the greenfield plan (useful long-term, but heavier than needed initially):
 
 ```
 qfbv-solver/
@@ -147,14 +177,145 @@ qfbv-solver/
     └── bench/                 # criterion benchmarks
 ```
 
+Recommended repository layout for a standalone-but-integrated `qfbvsmtrs` crate:
+
+```
+crates/
+├── qfbvsmtrs/                    # standalone pure-Rust QF_BV solver crate
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs                # public API exports
+│       ├── config.rs             # Config: SAT backend choice, budget, feature flags
+│       ├── error.rs              # qfbvsmtrs::Error / Result
+│       ├── query.rs              # Query, Command, Assertion, Assumption, expected responses
+│       ├── ir.rs                 # TermId, Sort, BvTerm, BoolTerm, declarations
+│       ├── arena.rs              # hash-consing arena + sort/width validation
+│       ├── frontend.rs           # yaspar SMT-LIB -> qfbvsmtrs::Query
+│       ├── builder.rs            # optional native Rust builder API for standalone users
+│       ├── simplify.rs           # word-level rewrites over qfbvsmtrs IR
+│       ├── gates.rs              # Boolean gate arena + structural hashing
+│       ├── circuits.rs           # BV circuits: add/sub/mul/div/shifts/comparisons/overflow
+│       ├── blast.rs              # qfbvsmtrs IR -> gate graph
+│       ├── cnf.rs                # Tseitin encoder and CNF data structures
+│       ├── sat.rs                # internal SAT trait + selected pure-Rust SAT implementation
+│       ├── solver.rs             # orchestration: Query -> SolveResult
+│       ├── model.rs              # qfbvsmtrs-native model values and formatting
+│       └── wire.rs               # optional `smt-wire` feature: ExprView/BinaryRequest -> Query
+│
+└── smt-server/
+    └── src/
+        ├── qfbvsmtrs_backend.rs  # implements smt_server::Backend using qfbvsmtrs
+        ├── lib.rs                # pub mod/export QfbvsmtrsBackend
+        └── main.rs               # RacingBackend(Z3Backend, BinbitBackend, QfbvsmtrsBackend)
+```
+
+The crate split in the original greenfield layout (`qfbv-ir`, `qfbv-bitblast`, `qfbv-cnf`, etc.) can be introduced later if the solver grows enough to justify internal crates. Start with one standalone `qfbvsmtrs` crate so users can depend on it directly and the server can still integrate it cleanly.
+
+Public standalone API sketch:
+
+```rust
+let result = qfbvsmtrs::solve_smt2(script, &qfbvsmtrs::Config::default())?;
+
+let mut b = qfbvsmtrs::Builder::new();
+let x = b.bv_var("x", 8)?;
+let forty_two = b.bv_const(42, 8)?;
+b.assert(b.bv_eq(x, forty_two)?)?;
+let result = qfbvsmtrs::Solver::default().solve(&b.finish()?)?;
+```
+
+Optional server-facing API sketch:
+
+```rust
+#[cfg(feature = "wire")]
+pub fn query_from_wire(request: &smt_wire::BinaryRequest) -> Result<Query>;
+```
+
 
 ## 4. Implementation Phases
+
+### Phase 0: Standalone `qfbvsmtrs` Crate + Server Backend Adapter (Week 0–1)
+
+**Goal:** Create `qfbvsmtrs` as an independently usable crate and make `smt-server` consume it as the third backend.
+
+**Deliverables:**
+
+1. Add `crates/qfbvsmtrs` to the workspace with no dependency on `smt-server`.
+2. Give the crate stable public entrypoints from day one:
+
+```rust
+pub fn parse_smt2(script: &str) -> Result<Query>;
+pub fn solve_smt2(script: &str, config: &Config) -> Result<SolveResult>;
+
+pub struct Solver { /* config + reusable allocation pools later */ }
+impl Solver {
+    pub fn solve(&mut self, query: &Query) -> Result<SolveResult>;
+}
+
+#[cfg(feature = "wire")]
+pub fn query_from_wire(request: &smt_wire::BinaryRequest) -> Result<Query>;
+```
+
+3. Add `crates/smt-server/src/qfbvsmtrs_backend.rs`:
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct QfbvsmtrsBackend;
+
+impl Backend for QfbvsmtrsBackend {
+    fn name(&self) -> &'static str { "qfbvsmtrs" }
+
+    fn handle(&self, request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult> {
+        // SIMPLIFY can identity-return initially.
+        // SOLVE converts request through qfbvsmtrs::query_from_wire(request), then calls Solver::solve.
+        // MINIMIZE/MAXIMIZE return Unknown until optimization is implemented.
+    }
+}
+```
+
+4. Export it from `crates/smt-server/src/lib.rs`.
+5. Add it to the default race in `crates/smt-server/src/main.rs` after Z3 and binbit:
+
+```rust
+let backend = Arc::new(RacingBackend::new(vec![
+    Arc::new(Z3Backend),
+    Arc::new(BinbitBackend),
+    Arc::new(QfbvsmtrsBackend::default()),
+]));
+```
+
+6. Add standalone crate smoke tests for `solve_smt2` and server smoke tests that call `handle_binary_frame` with only `QfbvsmtrsBackend` for tiny formulas.
+
+Initial feature policy should be conservative:
+
+| Request feature | V1 behavior |
+|---|---|
+| `Command::Solve` | supported once bit-blaster + SAT are ready |
+| `Command::Simplify` | identity `SimplifyBlock` passthrough |
+| `Command::Minimize` / `Maximize` | `Unknown("qfbvsmtrs optimization unsupported")` until bit-hunt optimization is added |
+| `WANT_MODEL` | supported for SAT by reading primary-input assignments |
+| `assumption_roots` | supported by conjoining assumptions initially; later use SAT assumptions |
+| `WANT_CORE` | if SAT, return SAT normally; if UNSAT before core support, return `Unknown` rather than `Unsat(None)` so the racing layer can wait for Z3/binbit to produce a core |
+| `budget_ms != 0` | enforce with SAT timeout/time checks or return `Unknown`; do not silently exceed the requested budget |
+
+This phase reserves the standalone SMT-LIB API immediately. The implementation can be thin at first, but the crate ownership boundary should be clear: `qfbvsmtrs` owns its parser/IR/solver; `smt-server` only adapts wire requests and wire responses.
+
+**Wire bridge details for this project:**
+
+- `smt-wire` expressions are already topologically ordered: every parent references only earlier children. `qfbvsmtrs::wire::query_from_wire` can iterate `ExprView::node_count()` once and maintain `Vec<Option<TermId>>`/`Vec<Option<BoolId>>` mappings.
+- The bridge should translate every wire `Tag` into the standalone IR or return a typed `UnsupportedFeature` error that `QfbvsmtrsBackend` maps to `QueryResult::unknown(...)`, not a server error.
+- The wire language has operations the original plan did not emphasize: `BV_SELECT`, `BV_SMOD`, Bool variables, and overflow predicates (`UADD_OVF`, `SADD_OVF`, `USUB_OVF`, `SSUB_OVF`, `UMUL_OVF`, `SMUL_OVF`, `NEG_OVF`, `SDIV_OVF`). These need either real circuits or explicit unknown/unsupported handling.
+- Model conversion must preserve wire variable node refs. SAT primary inputs should map back to `BV_VAR`/`BOOL_VAR` nodes, then the server adapter should emit `smt_wire::ModelEntry { node_ref, value }` with little-endian BV bytes and Bool values encoded as width `0`.
+- `assertion_roots` and `assumption_roots` both become Bool constraints in the standalone query. Initially assumptions may be conjoined; later they should become SAT assumptions so unsat-core and incremental behavior improve.
+- If the request asks for `WANT_CORE` and qfbvsmtrs cannot produce named cores yet, the adapter should avoid returning a misleading coreless `unsat`; return `Unknown` on the UNSAT path so the racing layer can wait for Z3/binbit.
+- Respect `budget_ms` by passing a deadline through `Config`; if the selected SAT backend cannot interrupt, return `Unknown` before starting work for nonzero tiny budgets or use a backend with timeout/interrupt support.
 
 ### Phase 1: IR + Frontend (Weeks 1–3)
 
 **Goal:** Parse QF_BV SMT-LIB files into an internal representation.
 
-**4.1.1 — BV Expression IR (`qfbv-ir`)**
+**Repository integration note:** this phase is required for standalone `qfbvsmtrs`. The server already has a text frontend, but that should not replace the crate's own standalone API. The server adapter should use `wire.rs` to translate `smt-wire` expressions into this same IR.
+
+**4.1.1 — BV Expression IR (`qfbvsmtrs::ir`)**
 
 Design a hash-consed DAG for BV terms. Every node is interned in an arena and referenced by a `TermId` (u32 index). Each node stores its sort (width for BV, or Bool).
 
@@ -174,6 +335,7 @@ enum BvTerm {
     BvURem(TermId, TermId),
     BvSDiv(TermId, TermId),
     BvSRem(TermId, TermId),
+    BvSMod(TermId, TermId),
     BvNeg(TermId),
 
     // Bitwise
@@ -184,6 +346,8 @@ enum BvTerm {
     BvShl(TermId, TermId),
     BvLShr(TermId, TermId),
     BvAShr(TermId, TermId),
+    RotateLeft { amount: u32, child: TermId },
+    RotateRight { amount: u32, child: TermId },
 
     // Structural
     Concat(TermId, TermId),
@@ -194,6 +358,9 @@ enum BvTerm {
 
     // Conditional (ite with BV result)
     Ite { cond: TermId, then_: TermId, else_: TermId },
+
+    // Server wire helper: mux chain for compact branch tables
+    Select { cases: Vec<(TermId, TermId)>, default: TermId },
 }
 
 enum BoolTerm {
@@ -209,11 +376,19 @@ enum BoolTerm {
     BvUle(TermId, TermId),
     BvSlt(TermId, TermId),
     BvSle(TermId, TermId),
+    UAddOverflow(TermId, TermId),
+    SAddOverflow(TermId, TermId),
+    USubOverflow(TermId, TermId),
+    SSubOverflow(TermId, TermId),
+    UMulOverflow(TermId, TermId),
+    SMulOverflow(TermId, TermId),
+    NegOverflow(TermId),
+    SDivOverflow(TermId, TermId),
     Ite { cond: TermId, then_: TermId, else_: TermId },
 }
 ```
 
-**4.1.2 — yaspar Frontend (`qfbv-frontend`)**
+**4.1.2 — yaspar Frontend (`qfbvsmtrs::frontend`)**
 
 Implement yaspar's `ParsingAction` trait hierarchy to build IR nodes from callbacks. Handle:
 - `declare-const`, `declare-fun` (0-arity) for BV variables
@@ -273,11 +448,13 @@ Each BV operation maps to a known circuit. Implement these as functions returnin
 | `bvmul` | Shift-and-add (Wallace tree optional) | O(n²) gates; Wallace tree for perf later |
 | `bvudiv` / `bvurem` | Long division (restoring or non-restoring) | Expensive — O(n²) gates, ~n iterations |
 | `bvsdiv` / `bvsrem` | Sign-fixup wrapper around udiv/urem | Negate inputs/outputs based on sign bits |
+| `bvsmod` | Derived from signed division/remainder semantics | Required by `smt-wire`; differs from `bvsrem` in sign convention |
 | `bvneg` | `bvadd(bvnot(x), 1)` | Two's complement negate |
 | `bvand/or/xor/not` | Bitwise (per-bit gate) | Trivial |
 | `bvshl` | Barrel shifter | log₂(n) stages of mux layers |
 | `bvlshr` | Barrel shifter (reverse) | Same structure, opposite direction |
 | `bvashr` | Like lshr but fill with sign bit | |
+| `rotate_left/right` | Concatenation/extract or shift/or rewrite | Indexed SMT-LIB rotate can be word-level rewritten |
 | `concat(a,b)` | Append bit vectors | Zero gates (structural) |
 | `extract [h:l]` | Slice bit vector | Zero gates (structural) |
 | `zero_extend` | Pad with `False` gates | |
@@ -287,6 +464,8 @@ Each BV operation maps to a known circuit. Implement these as functions returnin
 | `bvslt` | XOR sign bits into unsigned compare | Standard signed comparison circuit |
 | `eq` | AND of per-bit XNOR | `a = b` ↔ `∧ᵢ ¬(aᵢ ⊕ bᵢ)` |
 | `ite` | Per-bit mux | `mux(sel, then_i, else_i)` for each bit |
+| `select` | Nested `ite`/mux chain | Used by server wire IR (`BV_SELECT`) |
+| overflow predicates | Width-extension and sign-bit circuits | Match `smt-wire` overflow tags exactly |
 
 **4.2.3 — Top-Level Blaster (`qfbv-bitblast/blast.rs`)**
 
@@ -331,13 +510,14 @@ pub enum SatResult {
 pub trait SatBackend {
     fn new_var(&mut self) -> CnfVar;
     fn add_clause(&mut self, lits: &[Lit]);
-    fn solve(&mut self) -> SatResult;
+    fn solve(&mut self, assumptions: &[Lit], deadline: Option<std::time::Instant>) -> SatResult;
+    fn value(&self, var: CnfVar) -> Option<bool>;
 }
 ```
 
-Implement for `varisat::Solver` and `batsat::Solver`. This lets you swap solvers in tests and benchmarks.
+Implement for `varisat::Solver` and/or `batsat::Solver`. The trait should include assumptions and a deadline from the start because `smt-server` has `assumption_roots` and `budget_ms` in every request.
 
-**4.3.3 — Model Extraction (`qfbv-solver/model.rs`)**
+**4.3.3 — Model Extraction (`qfbvsmtrs::model`)**
 
 When SAT returns `Sat(assignment)`:
 1. For each declared BV variable, look up which `Input(i)` gates correspond to its bits
@@ -451,7 +631,7 @@ Also test that forcing the output to the *wrong* value yields UNSAT.
 
 ### 5.4 Layer 4 — Differential Testing Against Z3
 
-**What:** The most important end-to-end validation. Run the same `.smt2` files through both our solver and Z3, compare results.
+**What:** The most important end-to-end validation. Run the same `.smt2` files through standalone `qfbvsmtrs::solve_smt2`, the `QfbvsmtrsBackend` server adapter, and Z3, compare results.
 
 **How:**
 
@@ -554,8 +734,9 @@ The bit-blasting circuit for `bvudiv(a, b)` must handle this: when all bits of `
 
 | Week | Milestone | Exit Criteria |
 |---|---|---|
-| 1–2 | IR design + hash-consing arena | Can represent all QF_BV terms; sort-checks pass |
-| 3 | yaspar frontend integration | Can parse SMT-LIB QF_BV files into IR; dump and round-trip |
+| 0–1 | Standalone crate + server adapter skeleton | `crates/qfbvsmtrs` builds independently; `QfbvsmtrsBackend` exists and returns `Unknown`/identity simplify cleanly |
+| 1–2 | IR design + hash-consing arena | Can represent all QF_BV terms and server wire tags; sort-checks pass |
+| 3 | yaspar frontend + `smt-wire` bridge | `solve_smt2` parses standalone scripts; server adapter converts `BinaryRequest` into the same IR |
 | 4–5 | Bit-blasting: bitwise + arithmetic (add, sub, neg) | Layer 1 tests pass for and/or/xor/not/add/sub at 4-bit exhaustive |
 | 6–7 | Bit-blasting: mul, div, shifts, comparisons, extract/concat | Layer 1 tests pass for all ops at 4-bit; Layer 2 random tests at 32-bit |
 | 8 | Tseitin encoder + SAT integration | Can solve simple hand-written .smt2 files end-to-end |
