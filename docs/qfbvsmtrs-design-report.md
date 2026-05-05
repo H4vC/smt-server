@@ -129,7 +129,9 @@ The builder is the main simplification hook. It performs local, sound rewrites b
 - shifted product/add rewrites;
 - extension/constant equality and unsigned comparison reductions;
 - 1-bit ITE equality reduction;
-- limited polynomial equality normalization for small-to-medium rewrite verification formulas.
+- wide possible-bit-mask reasoning for disjoint `bvadd`, `bvand`, and `bvxor` reductions on packed-byte/shifted-slice terms;
+- limited polynomial equality normalization for small-to-medium rewrite verification formulas;
+- Noetzli-style algebraic rewrites for complement/absorption, `bvlshr x x`, shifted self-disjoint ORs, and shift/negation distribution.
 
 The solver also has preprocessing shortcuts in `solver.rs` for patterns that are too global for the local builder:
 
@@ -138,9 +140,12 @@ The solver also has preprocessing shortcuts in `solver.rs` for patterns that are
 - power-of-two sum contradiction patterns;
 - shift-one-add contradiction patterns;
 - unsigned and signed multiplication-overflow guard proofs;
-- log-slicing add/sub equivalence proofs;
+- log-slicing add/sub, signed/unsigned comparison, and shift equivalence proofs;
 - extensional extract/concat candidate contradictions;
-- cheap all-zero/all-one assignment SAT witness detection.
+- synchronized LFSR reset/injectivity contradictions from Bruttomesso-style state-machine equivalence checks;
+- Bruttomesso simple-processor decode/output equivalence contradictions;
+- cheap constant/seeded assignment SAT witness detection;
+- affine-byte and small explicit assignment SAT witness search, always validated by the evaluator before returning `sat`.
 
 These shortcuts are deliberately conservative. They return conclusive SAT/UNSAT only when the syntactic proof pattern is recognized exactly enough to be sound; otherwise the normal bit-blast/SAT path is used.
 
@@ -157,6 +162,7 @@ Important design choices:
 - Declared variables are included for model extraction when a model is requested.
 - The gate arena structurally hashes gates, so repeated Boolean subcircuits share nodes.
 - BV circuits are implemented in `circuits.rs` over gate vectors.
+- Multiplication by sparse syntactic constants uses a shift-add constant multiplier instead of the full quadratic multiplier when this reduces the generated CNF.
 
 Implemented circuit families include:
 
@@ -207,7 +213,7 @@ For SAT results with `want_model = true`, the solver maps SAT assignment bits ba
 - Bool variables are read from their gate value;
 - model values use qfbvsmtrs `ScalarValue` and can be formatted back to SMT-LIB.
 
-If no model is requested, SAT shortcuts may return `sat` without constructing a model. This is used intentionally for cheap witness patterns and corpus runs where only `check-sat` is needed.
+If no model is requested, SAT shortcuts may return `sat` without constructing a model. This is used intentionally for cheap witness patterns, including deterministic assignment evaluation, and corpus runs where only `check-sat` is needed.
 
 ## Unsat cores
 

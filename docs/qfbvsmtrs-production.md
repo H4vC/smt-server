@@ -4,7 +4,7 @@
 
 ## SAT backends
 
-- Default: `splr` CDCL SAT solver with timeout support.
+- Default: `splr` CDCL SAT solver with timeout support. The adapter gives SPLR a small internal CPU-time cushion because SPLR can report timeout conservatively under Windows/parallel corpus load; outer caller deadlines/process timeouts remain the production guardrail.
 - Alternate: `varisat` CDCL SAT solver for cross-checking and experiments.
 - Fallback/testing: internal DPLL solver.
 
@@ -37,4 +37,4 @@ See also:
 - `docs/qfbvsmtrs-design-report.md` for the solver architecture and design details.
 - `docs/qfbvsmtrs-corpus-results.md` for SMT-LIB QF_BV corpus command history.
 
-The corpus runs found no wrong conclusive answers, but many `unknown`/timeout cases remain under strict budgets, so the solver is not yet production-complete for arbitrary corpus workloads.
+The corpus runs found no wrong conclusive answers. Latest merged targeted status is 35,519 conclusive matches, 8,953 `unknown`, and 1,719 timeouts, so the solver is not yet production-complete for arbitrary corpus workloads.

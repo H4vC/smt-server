@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use crate::builder::{
     add_bytes, ashr_bytes, bytes_to_bounded_usize, cmp_unsigned_bytes, concat_bytes, extract_bytes,
@@ -32,9 +33,10 @@ impl Value {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum EvalAssignment {
+enum EvalAssignment<'a> {
     Constant(bool),
     Seed(u64),
+    Explicit(&'a BTreeMap<crate::ir::TermId, Vec<u8>>),
 }
 
 pub(crate) fn query_satisfied_by_constant_assignment(query: &Query, ones: bool) -> Result<bool> {
@@ -67,7 +69,25 @@ pub(crate) fn query_satisfied_by_seeded_assignment(query: &Query, seed: u64) -> 
     Ok(true)
 }
 
-fn evaluate(query: &Query, assignment: EvalAssignment) -> Result<Vec<Value>> {
+pub(crate) fn query_satisfied_by_bv_assignment(
+    query: &Query,
+    assignment: &BTreeMap<crate::ir::TermId, Vec<u8>>,
+) -> Result<bool> {
+    let values = evaluate(query, EvalAssignment::Explicit(assignment))?;
+    for assertion in &query.assertions {
+        if !values[assertion.root.index()].bool()? {
+            return Ok(false);
+        }
+    }
+    for assumption in &query.assumptions {
+        if !values[assumption.index()].bool()? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn evaluate(query: &Query, assignment: EvalAssignment<'_>) -> Result<Vec<Value>> {
     let mut values: Vec<Value> = Vec::with_capacity(query.arena.len());
     for (index, node) in query.arena.nodes().iter().enumerate() {
         let value = match &node.kind {
@@ -75,6 +95,7 @@ fn evaluate(query: &Query, assignment: EvalAssignment) -> Result<Vec<Value>> {
             NodeKind::BoolVar { name, external } => Value::Bool(match assignment {
                 EvalAssignment::Constant(value) => value,
                 EvalAssignment::Seed(seed) => seeded_bool(seed, index, name, *external),
+                EvalAssignment::Explicit(_) => false,
             }),
             NodeKind::BvConst { width, bytes } => Value::Bv {
                 width: *width,
@@ -91,6 +112,10 @@ fn evaluate(query: &Query, assignment: EvalAssignment) -> Result<Vec<Value>> {
                     EvalAssignment::Seed(seed) => {
                         seeded_bytes(*width, seed, index, name, *external)?
                     }
+                    EvalAssignment::Explicit(values) => values
+                        .get(&crate::ir::TermId(index as u32))
+                        .cloned()
+                        .unwrap_or_else(|| vec![0u8; bytes_for_width(*width).unwrap_or(0)]),
                 },
             },
 

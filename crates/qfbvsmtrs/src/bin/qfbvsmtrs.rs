@@ -75,6 +75,11 @@ fn run() -> qfbvsmtrs::Result<()> {
             solve_start.elapsed().as_secs_f64(),
             start.elapsed().as_secs_f64()
         );
+        if result.status == qfbvsmtrs::SolveStatus::Unknown {
+            if let Some(message) = &result.message {
+                eprintln!("qfbvsmtrs trace: unknown: {message}");
+            }
+        }
     }
     print!("{}", qfbvsmtrs::format_smt2_response(&query, &result));
     Ok(())

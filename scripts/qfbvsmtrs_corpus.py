@@ -154,6 +154,7 @@ def write_summary(
     summary_mode: str,
     queued: int,
     skipped: collections.Counter[str],
+    record_kinds: set[str],
 ) -> None:
     if summary_mode == "merged":
         latest = load_latest_by_path([*baseline_reports, report])
@@ -169,6 +170,7 @@ def write_summary(
             "report": str(report),
             "queued_this_run": queued,
             "skipped_this_run": dict(skipped),
+            "record_kinds": sorted(record_kinds),
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,7 +234,30 @@ def main() -> int:
         default="merged",
         help="summary source: output report only, or latest records from baseline(s)+output",
     )
+    parser.add_argument(
+        "--record-kinds",
+        default=",".join(sorted(ALL_KINDS)),
+        help=(
+            "comma-separated result kinds to append to --report. "
+            "Use 'ok' for improvement-only experimental runs that should not "
+            "record unknown/timeout regressions."
+        ),
+    )
+    parser.add_argument(
+        "--record-all",
+        action="store_true",
+        help="deprecated no-op; all result kinds are recorded by default",
+    )
+    parser.add_argument(
+        "--record-ok-only",
+        action="store_true",
+        help="shorthand for --record-kinds ok",
+    )
     args = parser.parse_args()
+
+    record_kinds = {"ok"} if args.record_ok_only else parse_kind_set(args.record_kinds)
+    if not record_kinds:
+        raise SystemExit("--record-kinds must contain at least one kind")
 
     skip_kinds = parse_kind_set(args.skip_kinds) or set()
     rerun_kinds = parse_kind_set(args.rerun_kinds)
@@ -283,6 +308,7 @@ def main() -> int:
                 "skipped": dict(skipped),
                 "baseline_reports": [str(path) for path in args.baseline_report],
                 "output_report": str(args.report),
+                "record_kinds": sorted(record_kinds),
             },
             sort_keys=True,
         ),
@@ -311,8 +337,9 @@ def main() -> int:
             for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
                 record = future.result()
                 counts[record["kind"]] += 1
-                report.write(json.dumps(record) + "\n")
-                report.flush()
+                if record["kind"] in record_kinds:
+                    report.write(json.dumps(record) + "\n")
+                    report.flush()
                 if done % 500 == 0 or record["kind"] not in ("ok",):
                     print(
                         done,
@@ -341,6 +368,7 @@ def main() -> int:
         args.summary_mode,
         len(queued_files),
         skipped,
+        record_kinds,
     )
     print("summary", summary, flush=True)
     return 0

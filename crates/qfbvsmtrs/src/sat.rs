@@ -4,8 +4,6 @@ use crate::config::SatBackendKind;
 use crate::error::Error;
 use varisat::ExtendFormula;
 
-const BUDGETED_SPLR_CLAUSE_LIMIT: usize = 250_000;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SatResult {
     Sat(Vec<bool>), // 1-based CNF variable values are returned at index var-1
@@ -24,11 +22,6 @@ pub fn solve_cnf(
         return SatResult::Unknown("budget exhausted".to_owned());
     }
     match backend {
-        SatBackendKind::Splr
-            if deadline.is_some() && clauses.len() > BUDGETED_SPLR_CLAUSE_LIMIT =>
-        {
-            DpllSolver::new(num_vars, clauses, deadline).solve(assumptions)
-        }
         SatBackendKind::Splr => solve_with_splr(num_vars, clauses, assumptions, deadline),
         SatBackendKind::Varisat => solve_with_varisat(num_vars, clauses, assumptions, deadline),
         SatBackendKind::Dpll => DpllSolver::new(num_vars, clauses, deadline).solve(assumptions),
@@ -117,7 +110,10 @@ fn solve_with_splr_inner(
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return SatResult::Unknown("budget exhausted".to_owned());
         };
-        config.c_timeout = remaining.as_secs_f64();
+        // SPLR's CPU-time timeout is conservative on some Windows runs and can
+        // report TimeOut while there is still wall-clock budget left. Give it a
+        // small internal cushion; callers still use an outer deadline/timeout.
+        config.c_timeout = remaining.as_secs_f64() + 0.75;
     }
 
     match splr::Solver::try_from((config, clauses.as_ref())) {

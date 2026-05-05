@@ -74,6 +74,35 @@ pub fn mul(gates: &mut GateArena, a: &[GateId], b: &[GateId]) -> Bits {
     mul_width(gates, a, b, a.len())
 }
 
+pub fn mul_const(gates: &mut GateArena, value: &[GateId], constant: &[u8]) -> Bits {
+    let width = value.len();
+    if const_is_zero(constant, width) {
+        return zero(width, gates);
+    }
+    if const_is_one(constant, width) {
+        return value.to_vec();
+    }
+    if const_is_all_ones(constant, width) {
+        return neg(gates, value);
+    }
+
+    let mut acc: Option<Bits> = None;
+    for shift in 0..width {
+        if !const_bit(constant, shift) {
+            continue;
+        }
+        let mut partial = zero(width, gates);
+        if shift < width {
+            partial[shift..width].copy_from_slice(&value[..(width - shift)]);
+        }
+        acc = Some(match acc {
+            Some(current) => add(gates, &current, &partial),
+            None => partial,
+        });
+    }
+    acc.unwrap_or_else(|| zero(width, gates))
+}
+
 pub fn mul_width(gates: &mut GateArena, a: &[GateId], b: &[GateId], width: usize) -> Bits {
     let mut acc = zero(width, gates);
     for (shift, &sel) in b.iter().enumerate() {
@@ -87,6 +116,24 @@ pub fn mul_width(gates: &mut GateArena, a: &[GateId], b: &[GateId], width: usize
         acc = add(gates, &acc, &partial);
     }
     acc
+}
+
+fn const_bit(bytes: &[u8], bit: usize) -> bool {
+    bytes
+        .get(bit / 8)
+        .is_some_and(|byte| ((byte >> (bit % 8)) & 1) != 0)
+}
+
+fn const_is_zero(bytes: &[u8], width: usize) -> bool {
+    (0..width).all(|bit| !const_bit(bytes, bit))
+}
+
+fn const_is_one(bytes: &[u8], width: usize) -> bool {
+    const_bit(bytes, 0) && (1..width).all(|bit| !const_bit(bytes, bit))
+}
+
+fn const_is_all_ones(bytes: &[u8], width: usize) -> bool {
+    (0..width).all(|bit| const_bit(bytes, bit))
 }
 
 pub fn eq_bits(gates: &mut GateArena, a: &[GateId], b: &[GateId]) -> GateId {

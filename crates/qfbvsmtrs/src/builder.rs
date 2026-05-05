@@ -226,6 +226,9 @@ impl Builder {
         if let Some((width, bytes)) = self.bv_const_value(x)? {
             return self.bv_const_bytes(&neg_bytes(&bytes, width), width);
         }
+        if let Some(inner) = self.bv_neg_child(x)? {
+            return Ok(inner);
+        }
         self.bv_unary(x, NodeKind::BvNeg)
     }
 
@@ -244,6 +247,18 @@ impl Builder {
         if let (Some((_, av)), Some((_, bv))) = (self.bv_const_value(a)?, self.bv_const_value(b)?) {
             let bytes = av.iter().zip(bv).map(|(x, y)| x & y).collect::<Vec<_>>();
             return self.bv_const_bytes(&bytes, width);
+        }
+        if self.is_bv_negation_pair(a, b)? {
+            return self.zero(width);
+        }
+        if self.have_disjoint_possible_bits(a, b, width)? {
+            return self.zero(width);
+        }
+        if self.bv_or_contains(a, b)? {
+            return Ok(b);
+        }
+        if self.bv_or_contains(b, a)? {
+            return Ok(a);
         }
         self.arena.add(NodeKind::BvAnd(a, b), Sort::Bv(width))
     }
@@ -264,6 +279,18 @@ impl Builder {
             let bytes = av.iter().zip(bv).map(|(x, y)| x | y).collect::<Vec<_>>();
             return self.bv_const_bytes(&bytes, width);
         }
+        if self.is_bv_negation_pair(a, b)? {
+            return self.all_ones(width);
+        }
+        if self.bv_and_contains(a, b)? {
+            return Ok(b);
+        }
+        if self.bv_and_contains(b, a)? {
+            return Ok(a);
+        }
+        if self.self_shift_left_pair(a, b)? {
+            return self.bv_add(a, b);
+        }
         self.arena.add(NodeKind::BvOr(a, b), Sort::Bv(width))
     }
 
@@ -280,6 +307,12 @@ impl Builder {
             let bytes = av.iter().zip(bv).map(|(x, y)| x ^ y).collect::<Vec<_>>();
             return self.bv_const_bytes(&bytes, width);
         }
+        if self.is_bv_negation_pair(a, b)? {
+            return self.all_ones(width);
+        }
+        if self.have_disjoint_possible_bits(a, b, width)? {
+            return self.bv_or(a, b);
+        }
         self.arena.add(NodeKind::BvXor(a, b), Sort::Bv(width))
     }
 
@@ -291,6 +324,9 @@ impl Builder {
         }
         if let (Some((_, av)), Some((_, bv))) = (self.bv_const_value(a)?, self.bv_const_value(b)?) {
             return self.bv_const_bytes(&add_bytes(&av, &bv, width), width);
+        }
+        if self.have_disjoint_possible_bits(a, b, width)? {
+            return self.bv_or(a, b);
         }
         if let Some(canonical) = self.canonical_bv_add(a, b, width)? {
             return Ok(canonical);
@@ -327,11 +363,20 @@ impl Builder {
         if self.is_one(a)? || self.is_one(b)? {
             return Ok(if self.is_one(a)? { b } else { a });
         }
+        if self.is_all_ones(a)? || self.is_all_ones(b)? {
+            let value = if self.is_all_ones(a)? { b } else { a };
+            return self.bv_neg(value);
+        }
+        if let Some(inner) = self.bv_neg_child(a)? {
+            let product = self.bv_mul(inner, b)?;
+            return self.bv_neg(product);
+        }
+        if let Some(inner) = self.bv_neg_child(b)? {
+            let product = self.bv_mul(a, inner)?;
+            return self.bv_neg(product);
+        }
         if let (Some((_, av)), Some((_, bv))) = (self.bv_const_value(a)?, self.bv_const_value(b)?) {
             return self.bv_const_bytes(&mul_bytes(&av, &bv, width), width);
-        }
-        if let Some(canonical) = self.canonical_bv_mul(a, b, width)? {
-            return Ok(canonical);
         }
         if let Some((value, amount)) = self.bv_shl_parts(a)? {
             let product = self.bv_mul(value, b)?;
@@ -340,6 +385,9 @@ impl Builder {
         if let Some((value, amount)) = self.bv_shl_parts(b)? {
             let product = self.bv_mul(a, value)?;
             return self.bv_shl(product, amount);
+        }
+        if let Some(canonical) = self.canonical_bv_mul(a, b, width)? {
+            return Ok(canonical);
         }
         self.bv_mul_node(a, b, width)
     }
@@ -397,12 +445,16 @@ impl Builder {
                 return self.bv_const_bytes(&shl_bytes(&bytes, width, amount), width);
             }
         }
+        if let Some(inner) = self.bv_neg_child(a)? {
+            let shifted = self.bv_shl(inner, b)?;
+            return self.bv_neg(shifted);
+        }
         self.arena.add(NodeKind::BvShl(a, b), Sort::Bv(width))
     }
 
     pub fn bv_lshr(&mut self, a: TermId, b: TermId) -> Result<TermId> {
         let width = self.arena.expect_same_bv(a, b, "BV lshr")?;
-        if self.is_zero(a)? {
+        if a == b || self.is_zero(a)? {
             return self.zero(width);
         }
         if let Some(amount) = self.const_shift_amount(b, width)? {
@@ -414,6 +466,12 @@ impl Builder {
             }
             if let Some((_, bytes)) = self.bv_const_value(a)? {
                 return self.bv_const_bytes(&lshr_bytes(&bytes, width, amount), width);
+            }
+        }
+        if let Some((inner, inner_amount)) = self.bv_lshr_parts(a)? {
+            if b < inner_amount {
+                let shifted = self.bv_lshr(inner, b)?;
+                return self.bv_lshr(shifted, inner_amount);
             }
         }
         self.arena.add(NodeKind::BvLShr(a, b), Sort::Bv(width))
@@ -1340,6 +1398,28 @@ impl Builder {
         )
     }
 
+    fn bv_neg_child(&self, id: TermId) -> Result<Option<TermId>> {
+        Ok(match &self.arena.node(id)?.kind {
+            NodeKind::BvNeg(child) => Some(*child),
+            _ => None,
+        })
+    }
+
+    fn bv_and_contains(&self, id: TermId, child: TermId) -> Result<bool> {
+        Ok(matches!(self.arena.node(id)?.kind, NodeKind::BvAnd(a, b) if a == child || b == child))
+    }
+
+    fn bv_or_contains(&self, id: TermId, child: TermId) -> Result<bool> {
+        Ok(matches!(self.arena.node(id)?.kind, NodeKind::BvOr(a, b) if a == child || b == child))
+    }
+
+    fn self_shift_left_pair(&self, a: TermId, b: TermId) -> Result<bool> {
+        Ok(
+            matches!(self.bv_shl_parts(a)?, Some((value, amount)) if value == b && amount == b)
+                || matches!(self.bv_shl_parts(b)?, Some((value, amount)) if value == a && amount == a),
+        )
+    }
+
     fn bv_shl_parts(&self, id: TermId) -> Result<Option<(TermId, TermId)>> {
         Ok(match &self.arena.node(id)?.kind {
             NodeKind::BvShl(value, amount) => Some((*value, *amount)),
@@ -1347,9 +1427,162 @@ impl Builder {
         })
     }
 
+    fn bv_lshr_parts(&self, id: TermId) -> Result<Option<(TermId, TermId)>> {
+        Ok(match &self.arena.node(id)?.kind {
+            NodeKind::BvLShr(value, amount) => Some((*value, *amount)),
+            _ => None,
+        })
+    }
+
     fn bv_extract_parts(&self, id: TermId) -> Result<Option<(TermId, u32, u32)>> {
         Ok(match &self.arena.node(id)?.kind {
             NodeKind::BvExtract { child, high, low } => Some((*child, *high, *low)),
+            _ => None,
+        })
+    }
+
+    fn have_disjoint_possible_bits(&self, a: TermId, b: TermId, width: u32) -> Result<bool> {
+        const MAX_MASK_WIDTH: u32 = 4096;
+        if width > MAX_MASK_WIDTH {
+            return Ok(false);
+        }
+        let (Some(left), Some(right)) = (
+            self.possible_bit_mask_bytes(a, width, 0)?,
+            self.possible_bit_mask_bytes(b, width, 0)?,
+        ) else {
+            return Ok(false);
+        };
+        Ok(!left
+            .iter()
+            .zip(right)
+            .any(|(left, right)| (left & right) != 0))
+    }
+
+    fn possible_bit_mask_bytes(
+        &self,
+        term: TermId,
+        width: u32,
+        depth: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        if width > 4096 || depth > 64 {
+            return Ok(None);
+        }
+        let byte_len = bytes_for_width(width)?;
+        Ok(match &self.arena.node(term)?.kind {
+            NodeKind::BvConst {
+                width: actual_width,
+                bytes,
+            } if *actual_width == width => {
+                let mut mask = bytes.clone();
+                mask.resize(byte_len, 0);
+                mask_unused_high_bits(&mut mask, width);
+                Some(mask)
+            }
+            NodeKind::BvVar { width: actual, .. } if *actual == width => {
+                let mut mask = vec![0xff; byte_len];
+                mask_unused_high_bits(&mut mask, width);
+                Some(mask)
+            }
+            NodeKind::BvZeroExtend { child, extra } => {
+                let Sort::Bv(child_width) = self.arena.sort(*child)? else {
+                    return Ok(None);
+                };
+                if child_width + extra == width {
+                    self.possible_bit_mask_bytes(*child, child_width, depth + 1)?
+                        .map(|mut mask| {
+                            mask.resize(byte_len, 0);
+                            mask_unused_high_bits(&mut mask, width);
+                            mask
+                        })
+                } else {
+                    None
+                }
+            }
+            NodeKind::BvShl(value, amount) => {
+                let Some(shift) = self.const_shift_amount(*amount, width)? else {
+                    return Ok(None);
+                };
+                self.possible_bit_mask_bytes(*value, width, depth + 1)?
+                    .map(|mask| shl_bytes(&mask, width, shift))
+            }
+            NodeKind::BvLShr(value, amount) => {
+                let Some(shift) = self.const_shift_amount(*amount, width)? else {
+                    return Ok(None);
+                };
+                self.possible_bit_mask_bytes(*value, width, depth + 1)?
+                    .map(|mask| lshr_bytes(&mask, width, shift))
+            }
+            NodeKind::BvExtract { child, high, low } => {
+                let Sort::Bv(child_width) = self.arena.sort(*child)? else {
+                    return Ok(None);
+                };
+                if high - low + 1 != width {
+                    return Ok(None);
+                }
+                self.possible_bit_mask_bytes(*child, child_width, depth + 1)?
+                    .map(|mask| extract_bytes(&mask, *low, width))
+            }
+            NodeKind::BvConcat(high, low) => {
+                let Sort::Bv(high_width) = self.arena.sort(*high)? else {
+                    return Ok(None);
+                };
+                let Sort::Bv(low_width) = self.arena.sort(*low)? else {
+                    return Ok(None);
+                };
+                if high_width + low_width != width {
+                    return Ok(None);
+                }
+                match (
+                    self.possible_bit_mask_bytes(*high, high_width, depth + 1)?,
+                    self.possible_bit_mask_bytes(*low, low_width, depth + 1)?,
+                ) {
+                    (Some(high_mask), Some(low_mask)) => {
+                        Some(concat_bytes(&high_mask, high_width, &low_mask, low_width))
+                    }
+                    _ => None,
+                }
+            }
+            NodeKind::BvAnd(left, right) => match (
+                self.possible_bit_mask_bytes(*left, width, depth + 1)?,
+                self.possible_bit_mask_bytes(*right, width, depth + 1)?,
+            ) {
+                (Some(mut left), Some(right)) => {
+                    for (left, right) in left.iter_mut().zip(right) {
+                        *left &= right;
+                    }
+                    Some(left)
+                }
+                (Some(mask), None) | (None, Some(mask)) => Some(mask),
+                (None, None) => None,
+            },
+            NodeKind::BvOr(left, right) | NodeKind::BvXor(left, right) => match (
+                self.possible_bit_mask_bytes(*left, width, depth + 1)?,
+                self.possible_bit_mask_bytes(*right, width, depth + 1)?,
+            ) {
+                (Some(mut left), Some(right)) => {
+                    for (left, right) in left.iter_mut().zip(right) {
+                        *left |= right;
+                    }
+                    Some(left)
+                }
+                _ => None,
+            },
+            NodeKind::BvIte {
+                then_value,
+                else_value,
+                ..
+            } => match (
+                self.possible_bit_mask_bytes(*then_value, width, depth + 1)?,
+                self.possible_bit_mask_bytes(*else_value, width, depth + 1)?,
+            ) {
+                (Some(mut then_mask), Some(else_mask)) => {
+                    for (then_mask, else_mask) in then_mask.iter_mut().zip(else_mask) {
+                        *then_mask |= else_mask;
+                    }
+                    Some(then_mask)
+                }
+                _ => None,
+            },
             _ => None,
         })
     }

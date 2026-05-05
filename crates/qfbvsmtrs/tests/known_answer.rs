@@ -157,6 +157,70 @@ fn known_answer_shifted_product_rewrite() {
 }
 
 #[test]
+fn known_answer_disjoint_bit_add_simplification() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun a () (_ BitVec 8))
+        (declare-fun b () (_ BitVec 8))
+        (declare-fun c () (_ BitVec 8))
+        (declare-fun d () (_ BitVec 8))
+        (assert (not (=
+            (bvadd (bvshl ((_ zero_extend 24) a) #x00000018) ((_ zero_extend 24) b))
+            (bvor (bvshl ((_ zero_extend 24) a) #x00000018) ((_ zero_extend 24) b)))) )
+        (assert (not (=
+            (bvand (bvshl ((_ zero_extend 248) c) (_ bv248 256)) ((_ zero_extend 248) d))
+            (_ bv0 256))))
+        (assert (not (=
+            (bvxor (bvshl ((_ zero_extend 248) c) (_ bv248 256)) ((_ zero_extend 248) d))
+            (bvor (bvshl ((_ zero_extend 248) c) (_ bv248 256)) ((_ zero_extend 248) d)))))
+        (check-sat)
+    ";
+    let result = solve_smt2(script, &Config::default()).unwrap();
+    assert_eq!(result.status, SolveStatus::Unsat);
+}
+
+#[test]
+fn known_answer_left_then_right_shift_identity() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun x () (_ BitVec 8))
+        (assert (not (=
+            (bvlshr (bvshl x #x03) #x05)
+            ((_ zero_extend 5) ((_ extract 4 2) x)))))
+        (assert (not (=
+            (bvlshr (bvshl x #x05) #x02)
+            (bvshl ((_ zero_extend 5) ((_ extract 2 0) x)) #x03))))
+        (check-sat)
+    ";
+    let result = solve_smt2(script, &Config::default()).unwrap();
+    assert_eq!(result.status, SolveStatus::Unsat);
+}
+
+#[test]
+fn known_answer_noetzli_simplification_identities() {
+    for assertion in [
+        "(= (bvmul t (bvadd (bvlshr t t) s)) (bvmul s t))",
+        "(= (bvand s (bvmul t (bvneg t))) (bvand s (bvneg (bvmul t t))))",
+        "(= (bvmul s (bvor t (bvand s t))) (bvmul s t))",
+        "(= (bvmul s (bvor t (bvshl t t))) (bvmul s (bvadd t (bvshl t t))))",
+        "(= (bvmul (bvmul s t) (bvshl t s)) (bvmul s (bvmul t (bvshl t s))))",
+        "(= (bvlshr (bvlshr s (bvmul s t)) t) (bvlshr (bvlshr s t) (bvmul s t)))",
+    ] {
+        let script = format!(
+            "
+            (set-logic QF_BV)
+            (declare-fun s () (_ BitVec 32))
+            (declare-fun t () (_ BitVec 32))
+            (assert (not {assertion}))
+            (check-sat)
+            "
+        );
+        let result = solve_smt2(&script, &Config::default()).unwrap();
+        assert_eq!(result.status, SolveStatus::Unsat, "{assertion}");
+    }
+}
+
+#[test]
 fn known_answer_extension_and_one_bit_ite_simplifications() {
     let zext_out_of_range = "
         (set-logic QF_BV)
@@ -198,6 +262,93 @@ fn known_answer_extension_and_one_bit_ite_simplifications() {
 }
 
 #[test]
+fn known_answer_small_explicit_assignment_sat_witness() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun s () (_ BitVec 32))
+        (declare-fun t () (_ BitVec 32))
+        (assert (not (= (bvmul t (bvlshr s (bvshl t s)))
+                        (bvmul s (bvlshr t (bvshl t s))))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(script, &Config::default()).unwrap().status,
+        SolveStatus::Sat
+    );
+}
+
+#[test]
+fn known_answer_affine_byte_sat_witness() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun a () (_ BitVec 8))
+        (declare-fun b () (_ BitVec 8))
+        (declare-fun c () (_ BitVec 8))
+        (assert (= (_ bv65636 32)
+            (bvadd (bvmul ((_ zero_extend 24) a) (_ bv65599 32))
+                   (bvadd (bvmul ((_ zero_extend 24) b) (_ bv17 32))
+                          ((_ zero_extend 24) c)))))
+        (assert (bvult ((_ zero_extend 24) a) (_ bv97 32)))
+        (assert (bvult ((_ zero_extend 24) b) (_ bv97 32)))
+        (assert (bvult ((_ zero_extend 24) c) (_ bv97 32)))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(script, &Config::default()).unwrap().status,
+        SolveStatus::Sat
+    );
+
+    let packed = "
+        (set-logic QF_BV)
+        (declare-fun a () (_ BitVec 8))
+        (declare-fun b () (_ BitVec 8))
+        (declare-fun c () (_ BitVec 8))
+        (declare-fun d () (_ BitVec 8))
+        (assert (= (_ bv67305985 32)
+            (bvor (bvshl ((_ zero_extend 24) d) (_ bv24 32))
+              (bvor (bvshl ((_ zero_extend 24) c) (_ bv16 32))
+                (bvor (bvshl ((_ zero_extend 24) b) (_ bv8 32))
+                      ((_ zero_extend 24) a))))))
+        (assert (bvsge a (_ bv0 8)))
+        (assert (bvsge b (_ bv0 8)))
+        (assert (bvsge c (_ bv0 8)))
+        (assert (bvsge d (_ bv0 8)))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(packed, &Config::default()).unwrap().status,
+        SolveStatus::Sat
+    );
+}
+
+#[test]
+fn known_answer_sparse_constant_multiplication_blasting() {
+    let times_two = "
+        (set-logic QF_BV)
+        (declare-fun x () (_ BitVec 16))
+        (assert (not (= (bvmul x (_ bv2 16)) (bvshl x (_ bv1 16)))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(times_two, &Config::default()).unwrap().status,
+        SolveStatus::Unsat
+    );
+
+    let times_minus_one = "
+        (set-logic QF_BV)
+        (declare-fun x () (_ BitVec 16))
+        (assert (not (= (bvmul x #xffff) (bvneg x))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(times_minus_one, &Config::default())
+            .unwrap()
+            .status,
+        SolveStatus::Unsat
+    );
+}
+
+#[test]
 fn known_answer_constant_assignment_sat_shortcut() {
     let script = "
         (set-logic QF_BV)
@@ -210,6 +361,126 @@ fn known_answer_constant_assignment_sat_shortcut() {
     assert_eq!(
         solve_smt2(script, &Config::default()).unwrap().status,
         SolveStatus::Sat
+    );
+}
+
+#[test]
+fn known_answer_simple_processor_equivalence_shortcut() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun opcode () (_ BitVec 8))
+        (declare-fun operator1 () (_ BitVec 4))
+        (declare-fun operator2 () (_ BitVec 4))
+        (declare-fun opr1_1 () (_ BitVec 4))
+        (declare-fun op1_1 () (_ BitVec 4))
+        (declare-fun opr2_1 () (_ BitVec 4))
+        (declare-fun op2_1 () (_ BitVec 4))
+        (declare-fun decode_1 () (_ BitVec 9))
+        (declare-fun dec_func_1 () (_ BitVec 1))
+        (declare-fun deci_func_1 () (_ BitVec 1))
+        (declare-fun func_1 () (_ BitVec 1))
+        (declare-fun out_1 () (_ BitVec 4))
+        (declare-fun mode_1 () (_ BitVec 1))
+        (declare-fun opr1_2 () (_ BitVec 4))
+        (declare-fun op1_2 () (_ BitVec 4))
+        (declare-fun opr2_2 () (_ BitVec 4))
+        (declare-fun op2_2 () (_ BitVec 4))
+        (declare-fun decode_2 () (_ BitVec 9))
+        (declare-fun dec_func_2 () (_ BitVec 1))
+        (declare-fun deci_func_2 () (_ BitVec 1))
+        (declare-fun func_2 () (_ BitVec 1))
+        (declare-fun out_2 () (_ BitVec 4))
+        (declare-fun mode_2 () (_ BitVec 1))
+        (assert
+          (and
+            (= opr1_1 operator1)
+            (ite (= opcode (_ bv136 8)) (and (= dec_func_1 #b1) (= opr2_1 operator2))
+              (ite (= opcode (_ bv137 8)) (and (= dec_func_1 #b0) (= opr2_1 operator2))
+                (ite (= opcode (_ bv138 8)) (and (= dec_func_1 #b1) (= opr2_1 #x1))
+                  (and (= dec_func_1 #b0) (= opr2_1 #x1)))))
+            (ite (= opcode (_ bv136 8)) (and (= deci_func_1 #b1) (= opr2_1 operator2))
+              (ite (= opcode (_ bv137 8)) (and (= deci_func_1 #b0) (= opr2_1 operator2))
+                (ite (= opcode (_ bv138 8)) (and (= deci_func_1 #b1) (= opr2_1 #x1))
+                  (and (= deci_func_1 #b0) (= opr2_1 #x1)))))
+            (ite (= mode_1 #b0)
+              (= decode_1 (concat (concat dec_func_1 opr1_1) opr2_1))
+              (= decode_1 (concat (concat deci_func_1 opr2_1) opr1_1)))
+            (ite (= mode_1 #b0)
+              (and (= func_1 ((_ extract 8 8) decode_1)) (= op1_1 ((_ extract 7 4) decode_1)) (= op2_1 ((_ extract 3 0) decode_1)))
+              (and (= func_1 ((_ extract 8 8) decode_1)) (= op2_1 ((_ extract 7 4) decode_1)) (= op1_1 ((_ extract 3 0) decode_1))))
+            (ite (= func_1 #b1) (= out_1 (bvadd op1_1 op2_1)) (= out_1 (bvor op1_1 op2_1)))
+            (= opr1_2 operator1)
+            (ite (= opcode (_ bv136 8)) (and (= dec_func_2 #b1) (= opr2_2 operator2))
+              (ite (= opcode (_ bv137 8)) (and (= dec_func_2 #b0) (= opr2_2 operator2))
+                (ite (= opcode (_ bv138 8)) (and (= dec_func_2 #b1) (= opr2_2 #x1))
+                  (and (= dec_func_2 #b0) (= opr2_2 #x1)))))
+            (ite (= opcode (_ bv136 8)) (and (= deci_func_2 #b1) (= opr2_2 operator2))
+              (ite (= opcode (_ bv137 8)) (and (= deci_func_2 #b0) (= opr2_2 operator2))
+                (ite (= opcode (_ bv138 8)) (and (= deci_func_2 #b1) (= opr2_2 #x1))
+                  (and (= deci_func_2 #b0) (= opr2_2 #x1)))))
+            (ite (= mode_2 #b0)
+              (= decode_2 (concat (concat opr1_2 dec_func_2) opr2_2))
+              (= decode_2 (concat (concat opr2_2 deci_func_2) opr1_2)))
+            (ite (= mode_2 #b0)
+              (and (= op1_2 ((_ extract 8 5) decode_2)) (= func_2 ((_ extract 4 4) decode_2)) (= op2_2 ((_ extract 3 0) decode_2)))
+              (and (= op2_2 ((_ extract 8 5) decode_2)) (= func_2 ((_ extract 4 4) decode_2)) (= op1_2 ((_ extract 3 0) decode_2))))
+            (ite (= func_2 #b1) (= out_2 (bvadd op1_2 op2_2)) (= out_2 (bvor op1_2 op2_2)))
+            (and (= mode_1 mode_2) (not (= out_1 out_2)))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(script, &Config::default()).unwrap().status,
+        SolveStatus::Unsat
+    );
+}
+
+#[test]
+fn known_answer_synchronized_lfsr_shortcut() {
+    let step = |from: &str, to: &str, reset: &str| {
+        format!(
+            "(ite {reset} (= {to} #b0000) (= {to} \
+             (concat ((_ extract 2 0) {from}) \
+                     (bvxor ((_ extract 3 3) {from}) ((_ extract 2 2) {from})))))",
+        )
+    };
+    let script = format!(
+        "
+        (set-logic QF_BV)
+        (declare-fun reset_0 () Bool)
+        (declare-fun reset_1 () Bool)
+        (declare-fun q1_0 () (_ BitVec 4))
+        (declare-fun q1_1 () (_ BitVec 4))
+        (declare-fun q1_2 () (_ BitVec 4))
+        (declare-fun q2_0 () (_ BitVec 4))
+        (declare-fun q2_1 () (_ BitVec 4))
+        (declare-fun q2_2 () (_ BitVec 4))
+        (declare-fun q3_0 () (_ BitVec 4))
+        (declare-fun q3_1 () (_ BitVec 4))
+        (declare-fun q3_2 () (_ BitVec 4))
+        (assert (and
+            {q10}
+            {q11}
+            {q20}
+            {q21}
+            {q30}
+            {q31}
+            (not (= q1_0 q2_0))
+            (not (= q1_0 q3_0))
+            (not (= q2_0 q3_0))
+            (= (or (= q1_2 q2_2) (= q1_2 q3_2) (= q2_2 q3_2))
+               (and (not reset_0) (not reset_1)))))
+        (check-sat)
+        ",
+        q10 = step("q1_0", "q1_1", "reset_0"),
+        q11 = step("q1_1", "q1_2", "reset_1"),
+        q20 = step("q2_0", "q2_1", "reset_0"),
+        q21 = step("q2_1", "q2_2", "reset_1"),
+        q30 = step("q3_0", "q3_1", "reset_0"),
+        q31 = step("q3_1", "q3_2", "reset_1"),
+    );
+    assert_eq!(
+        solve_smt2(&script, &Config::default()).unwrap().status,
+        SolveStatus::Unsat
     );
 }
 
@@ -231,6 +502,108 @@ fn known_answer_extensional_candidate_shortcut() {
                 (and
                     (= ((_ extract 31 8) a) (concat ((_ extract 31 16) v2) d))
                     (= ((_ extract 23 0) a) (concat d ((_ extract 15 0) v2)))))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(script, &Config::default()).unwrap().status,
+        SolveStatus::Unsat
+    );
+}
+
+#[test]
+fn known_answer_log_slicing_shift_shortcut() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun x () (_ BitVec 4))
+        (declare-fun amount () (_ BitVec 4))
+        (declare-fun result () (_ BitVec 4))
+        (assert (= result (bvshl x amount)))
+        (declare-fun sx0 () (_ BitVec 4))
+        (assert (= sx0 x))
+        (declare-fun sh1 () (_ BitVec 4))
+        (assert (= ((_ extract 2 0) sx0) ((_ extract 3 1) sh1)))
+        (assert (= #b0 ((_ extract 0 0) sh1)))
+        (declare-fun m1 () (_ BitVec 4))
+        (assert (= m1 (concat (concat ((_ extract 0 0) amount) ((_ extract 0 0) amount))
+                              (concat ((_ extract 0 0) amount) ((_ extract 0 0) amount)))))
+        (declare-fun sx1 () (_ BitVec 4))
+        (assert (= sx1 (bvor (bvand m1 sh1) (bvand (bvnot m1) sx0))))
+        (declare-fun sh2 () (_ BitVec 4))
+        (assert (= ((_ extract 1 0) sx1) ((_ extract 3 2) sh2)))
+        (assert (= #b00 ((_ extract 1 0) sh2)))
+        (declare-fun m2 () (_ BitVec 4))
+        (assert (= m2 (concat (concat ((_ extract 1 1) amount) ((_ extract 1 1) amount))
+                              (concat ((_ extract 1 1) amount) ((_ extract 1 1) amount)))))
+        (declare-fun sx2 () (_ BitVec 4))
+        (assert (= sx2 (bvor (bvand m2 sh2) (bvand (bvnot m2) sx1))))
+        (declare-fun x0 () (_ BitVec 4))
+        (declare-fun y0 () (_ BitVec 4))
+        (assert (= x0 amount))
+        (assert (= y0 #x4))
+        (declare-fun c1 () (_ BitVec 1))
+        (assert (= (= c1 #b1) (= ((_ extract 3 2) x0) ((_ extract 3 2) y0))))
+        (declare-fun cm1 () (_ BitVec 2))
+        (assert (= cm1 (concat c1 c1)))
+        (declare-fun cx1 () (_ BitVec 2))
+        (declare-fun cy1 () (_ BitVec 2))
+        (assert (= cx1 (bvor (bvand cm1 ((_ extract 1 0) x0)) (bvand (bvnot cm1) ((_ extract 3 2) x0)))))
+        (assert (= cy1 (bvor (bvand cm1 ((_ extract 1 0) y0)) (bvand (bvnot cm1) ((_ extract 3 2) y0)))))
+        (declare-fun c2 () (_ BitVec 1))
+        (assert (= (= c2 #b1) (= ((_ extract 1 1) cx1) ((_ extract 1 1) cy1))))
+        (declare-fun cx2 () (_ BitVec 1))
+        (declare-fun cy2 () (_ BitVec 1))
+        (assert (= cx2 (bvor (bvand c2 ((_ extract 0 0) cx1)) (bvand (bvnot c2) ((_ extract 1 1) cx1)))))
+        (assert (= cy2 (bvor (bvand c2 ((_ extract 0 0) cy1)) (bvand (bvnot c2) ((_ extract 1 1) cy1)))))
+        (declare-fun lt () (_ BitVec 1))
+        (assert (= lt (bvand (bvnot cx2) cy2)))
+        (declare-fun valid () (_ BitVec 4))
+        (assert (= valid (concat (concat lt lt) (concat lt lt))))
+        (assert (not (= result (bvor (bvand valid sx2) (bvand (bvnot valid) #x0)))))
+        (check-sat)
+    ";
+    assert_eq!(
+        solve_smt2(script, &Config::default()).unwrap().status,
+        SolveStatus::Unsat
+    );
+}
+
+#[test]
+fn known_answer_log_slicing_comparison_shortcut() {
+    let script = "
+        (set-logic QF_BV)
+        (declare-fun x () (_ BitVec 3))
+        (declare-fun y () (_ BitVec 3))
+        (declare-fun result () Bool)
+        (assert (= result (bvult x y)))
+        (declare-fun x0 () (_ BitVec 4))
+        (declare-fun y0 () (_ BitVec 4))
+        (assert (= #b0 ((_ extract 3 3) x0)))
+        (assert (= x ((_ extract 2 0) x0)))
+        (assert (= #b0 ((_ extract 3 3) y0)))
+        (assert (= y ((_ extract 2 0) y0)))
+        (declare-fun c1 () (_ BitVec 1))
+        (assert (= (= c1 #b1) (= ((_ extract 3 2) x0) ((_ extract 3 2) y0))))
+        (declare-fun mx1 () (_ BitVec 2))
+        (declare-fun my1 () (_ BitVec 2))
+        (assert (= c1 ((_ extract 1 1) mx1)))
+        (assert (= c1 ((_ extract 0 0) mx1)))
+        (assert (= c1 ((_ extract 1 1) my1)))
+        (assert (= c1 ((_ extract 0 0) my1)))
+        (declare-fun x1 () (_ BitVec 2))
+        (declare-fun y1 () (_ BitVec 2))
+        (assert (= x1 (bvor (bvand mx1 ((_ extract 1 0) x0)) (bvand (bvnot mx1) ((_ extract 3 2) x0)))))
+        (assert (= y1 (bvor (bvand my1 ((_ extract 1 0) y0)) (bvand (bvnot my1) ((_ extract 3 2) y0)))))
+        (declare-fun c2 () (_ BitVec 1))
+        (assert (= (= c2 #b1) (= ((_ extract 1 1) x1) ((_ extract 1 1) y1))))
+        (declare-fun mx2 () (_ BitVec 1))
+        (declare-fun my2 () (_ BitVec 1))
+        (assert (= mx2 c2))
+        (assert (= my2 c2))
+        (declare-fun x2 () (_ BitVec 1))
+        (declare-fun y2 () (_ BitVec 1))
+        (assert (= x2 (bvor (bvand mx2 ((_ extract 0 0) x1)) (bvand (bvnot mx2) ((_ extract 1 1) x1)))))
+        (assert (= y2 (bvor (bvand my2 ((_ extract 0 0) y1)) (bvand (bvnot my2) ((_ extract 1 1) y1)))))
+        (assert (not (= result (= (bvand (bvnot x2) y2) #b1))))
         (check-sat)
     ";
     assert_eq!(

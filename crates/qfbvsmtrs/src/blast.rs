@@ -121,9 +121,27 @@ pub fn blast_query_with_deadline(query: &Query, deadline: Option<Instant>) -> Re
                 BlastedValue::Bv(circuits::sub(&mut ctx.gates, &a, &b))
             }
             NodeKind::BvMul(a, b) => {
-                let a = ctx.bv(*a)?;
-                let b = ctx.bv(*b)?;
-                BlastedValue::Bv(circuits::mul(&mut ctx.gates, &a, &b))
+                if let Some((_, bytes)) = bv_const_value(query, *a)? {
+                    let b = ctx.bv(*b)?;
+                    if use_constant_multiplier(&bytes, b.len()) {
+                        BlastedValue::Bv(circuits::mul_const(&mut ctx.gates, &b, &bytes))
+                    } else {
+                        let a = ctx.bv(*a)?;
+                        BlastedValue::Bv(circuits::mul(&mut ctx.gates, &a, &b))
+                    }
+                } else if let Some((_, bytes)) = bv_const_value(query, *b)? {
+                    let a = ctx.bv(*a)?;
+                    if use_constant_multiplier(&bytes, a.len()) {
+                        BlastedValue::Bv(circuits::mul_const(&mut ctx.gates, &a, &bytes))
+                    } else {
+                        let b = ctx.bv(*b)?;
+                        BlastedValue::Bv(circuits::mul(&mut ctx.gates, &a, &b))
+                    }
+                } else {
+                    let a = ctx.bv(*a)?;
+                    let b = ctx.bv(*b)?;
+                    BlastedValue::Bv(circuits::mul(&mut ctx.gates, &a, &b))
+                }
             }
             NodeKind::BvUDiv(a, b) => {
                 let a = ctx.bv(*a)?;
@@ -335,6 +353,31 @@ pub fn blast_query_with_deadline(query: &Query, deadline: Option<Instant>) -> Re
         assertion,
         variables: ctx.variables,
     })
+}
+
+fn bv_const_value(query: &Query, id: TermId) -> Result<Option<(u32, Vec<u8>)>> {
+    Ok(match &query.arena.node(id)?.kind {
+        NodeKind::BvConst { width, bytes } => Some((*width, bytes.clone())),
+        _ => None,
+    })
+}
+
+fn use_constant_multiplier(bytes: &[u8], width: usize) -> bool {
+    let mut ones = 0usize;
+    for bit in 0..width {
+        let byte = bytes.get(bit / 8).copied().unwrap_or(0);
+        if ((byte >> (bit % 8)) & 1) != 0 {
+            ones += 1;
+            if ones > 2 {
+                break;
+            }
+        }
+    }
+    ones <= 2
+        || (0..width).all(|bit| {
+            let byte = bytes.get(bit / 8).copied().unwrap_or(0);
+            ((byte >> (bit % 8)) & 1) != 0
+        })
 }
 
 fn reachable_terms(query: &Query) -> Result<Vec<bool>> {

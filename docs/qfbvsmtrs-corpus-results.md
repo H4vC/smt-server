@@ -110,15 +110,15 @@ Merged with the full baseline these targeted passes yield:
 
 ## Latest merged status
 
-Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `log-slicing`, `brummayerbiere4`, `challenge`, Noetzli polynomial rewrite cases, and Bruttomesso extensional cases.
+Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `sage` app slices, `log-slicing` add/sub/comparison/shift cases, `brummayerbiere4`, `challenge`, Noetzli polynomial/algebraic rewrite cases, Bruttomesso extensional/LFSR/simple-processor cases, sampled `spear`, and `uclid`.
 
 Latest merged-by-path status across the full baseline and targeted reports currently stands at:
 
 | Class | Count |
 |---|---:|
-| Conclusive and matched `:status` | 34,327 |
-| Returned `unknown` against a known sat/unsat status | 10,048 |
-| Hit the hard process timeout | 1,816 |
+| Conclusive and matched `:status` | 35,519 |
+| Returned `unknown` against a known sat/unsat status | 8,953 |
+| Hit the hard process timeout | 1,719 |
 | Frontend/backend error | 0 |
 | Conclusive wrong answer | 0 |
 
@@ -161,4 +161,18 @@ python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
   --list-only
 ```
 
-For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 11,864 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
+For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 10,672 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
+
+Improvement-only experimental runs can avoid recording unknown/timeout regressions while still preserving solved cases:
+
+```sh
+python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
+  --baseline-report target/smtlib/qfbvsmtrs_corpus_report_v3.jsonl \
+  --rerun-kinds unknown,timeout \
+  --path-contains Sage2 \
+  --report target/smtlib/qfbvsmtrs_corpus_rerun_sage2_next_ok.jsonl \
+  --budget-ms 3000 \
+  --timeout 30 \
+  --workers 8 \
+  --record-ok-only
+```
