@@ -30,3 +30,11 @@ cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
 ```
 
 The checked-in default suite includes exhaustive 4-bit circuit tests, randomized 16/32/64-bit circuit properties, Tseitin truth-table tests across all SAT backends, known-answer SMT-LIB fixtures, Z3 differential smoke tests through the Rust `z3` crate, standalone solver tests, and server integration tests.
+
+See also:
+
+- `docs/qfbvsmtrs-progress-report.md` for the current implementation/corpus status.
+- `docs/qfbvsmtrs-design-report.md` for the solver architecture and design details.
+- `docs/qfbvsmtrs-corpus-results.md` for SMT-LIB QF_BV corpus command history.
+
+The corpus runs found no wrong conclusive answers, but many `unknown`/timeout cases remain under strict budgets, so the solver is not yet production-complete for arbitrary corpus workloads.

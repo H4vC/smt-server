@@ -1,8 +1,9 @@
 use crate::circuits;
 use crate::error::{Error, Result};
 use crate::gates::{GateArena, GateId};
-use crate::ir::{NodeKind, Sort, TermId};
+use crate::ir::{Arena, NodeKind, Sort, TermId};
 use crate::query::Query;
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub enum BlastedValue {
@@ -27,14 +28,27 @@ pub struct BlastResult {
 }
 
 pub fn blast_query(query: &Query) -> Result<BlastResult> {
+    blast_query_with_deadline(query, None)
+}
+
+pub fn blast_query_with_deadline(query: &Query, deadline: Option<Instant>) -> Result<BlastResult> {
     let mut ctx = BlastContext {
         gates: GateArena::new(),
         values: vec![None; query.arena.len()],
         variables: Vec::new(),
     };
+    let reachable = reachable_terms(query)?;
 
     for (index, node) in query.arena.nodes().iter().enumerate() {
+        if index % 1024 == 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(Error::Timeout);
+        }
         let id = TermId(index as u32);
+        let include_for_model = query.want_model
+            && matches!(node.kind, NodeKind::BvVar { .. } | NodeKind::BoolVar { .. });
+        if !reachable[index] && !include_for_model {
+            continue;
+        }
         let value = match &node.kind {
             NodeKind::BvConst { width, bytes } => {
                 let bits = (0..*width)
@@ -321,6 +335,100 @@ pub fn blast_query(query: &Query) -> Result<BlastResult> {
         assertion,
         variables: ctx.variables,
     })
+}
+
+fn reachable_terms(query: &Query) -> Result<Vec<bool>> {
+    let mut reachable = vec![false; query.arena.len()];
+    let mut stack = query.assertions_and_assumptions().collect::<Vec<_>>();
+    if let Some(target) = query.target {
+        stack.push(target);
+    }
+    while let Some(id) = stack.pop() {
+        let slot = reachable.get_mut(id.index()).ok_or_else(|| {
+            Error::invalid("term id", format!("term {} is out of bounds", id.raw()))
+        })?;
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        push_children(&query.arena, id, &mut stack)?;
+    }
+    Ok(reachable)
+}
+
+fn push_children(arena: &Arena, id: TermId, stack: &mut Vec<TermId>) -> Result<()> {
+    match &arena.node(id)?.kind {
+        NodeKind::BvConst { .. }
+        | NodeKind::BvVar { .. }
+        | NodeKind::BoolConst(_)
+        | NodeKind::BoolVar { .. } => {}
+        NodeKind::BvNot(x)
+        | NodeKind::BvNeg(x)
+        | NodeKind::BvExtract { child: x, .. }
+        | NodeKind::BvZeroExtend { child: x, .. }
+        | NodeKind::BvSignExtend { child: x, .. }
+        | NodeKind::BvRepeat { child: x, .. }
+        | NodeKind::BvRotateLeft { child: x, .. }
+        | NodeKind::BvRotateRight { child: x, .. }
+        | NodeKind::BoolNot(x)
+        | NodeKind::NegOverflow(x) => stack.push(*x),
+        NodeKind::BvAnd(a, b)
+        | NodeKind::BvOr(a, b)
+        | NodeKind::BvXor(a, b)
+        | NodeKind::BvAdd(a, b)
+        | NodeKind::BvSub(a, b)
+        | NodeKind::BvMul(a, b)
+        | NodeKind::BvUDiv(a, b)
+        | NodeKind::BvURem(a, b)
+        | NodeKind::BvSDiv(a, b)
+        | NodeKind::BvSRem(a, b)
+        | NodeKind::BvSMod(a, b)
+        | NodeKind::BvShl(a, b)
+        | NodeKind::BvLShr(a, b)
+        | NodeKind::BvAShr(a, b)
+        | NodeKind::BvConcat(a, b)
+        | NodeKind::BoolAnd(a, b)
+        | NodeKind::BoolOr(a, b)
+        | NodeKind::BoolImplies(a, b)
+        | NodeKind::BoolEq(a, b)
+        | NodeKind::BvEq(a, b)
+        | NodeKind::BvUlt(a, b)
+        | NodeKind::BvUle(a, b)
+        | NodeKind::BvSlt(a, b)
+        | NodeKind::BvSle(a, b)
+        | NodeKind::UAddOverflow(a, b)
+        | NodeKind::SAddOverflow(a, b)
+        | NodeKind::USubOverflow(a, b)
+        | NodeKind::SSubOverflow(a, b)
+        | NodeKind::UMulOverflow(a, b)
+        | NodeKind::SMulOverflow(a, b)
+        | NodeKind::SDivOverflow(a, b) => {
+            stack.push(*a);
+            stack.push(*b);
+        }
+        NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        }
+        | NodeKind::BoolIte {
+            cond,
+            then_value,
+            else_value,
+        } => {
+            stack.push(*cond);
+            stack.push(*then_value);
+            stack.push(*else_value);
+        }
+        NodeKind::BvSelect { cases, default } => {
+            stack.push(*default);
+            for (selector, value) in cases {
+                stack.push(*selector);
+                stack.push(*value);
+            }
+        }
+    }
+    Ok(())
 }
 
 struct BlastContext {

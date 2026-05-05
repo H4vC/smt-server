@@ -6,6 +6,7 @@ pub mod circuits;
 pub mod cnf;
 pub mod config;
 pub mod error;
+pub(crate) mod eval;
 pub mod frontend;
 pub mod gates;
 pub mod ir;

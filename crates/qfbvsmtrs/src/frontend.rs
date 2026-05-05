@@ -36,10 +36,18 @@ struct Binding {
     sort: SmtSort,
 }
 
+#[derive(Debug, Clone)]
+struct FunctionBinding {
+    params: Vec<(String, SmtSort)>,
+    result: SmtSort,
+    body: SExpr,
+}
+
 #[derive(Debug, Default)]
 struct ScriptState {
     builder: Builder,
     env: HashMap<String, Binding>,
+    functions: HashMap<String, FunctionBinding>,
     saw_check_sat: bool,
 }
 
@@ -184,19 +192,49 @@ fn define_fun(state: &mut ScriptState, list: &[SExpr]) -> Result<()> {
             "expected name, args, sort, body",
         ));
     }
-    match &list[2] {
-        SExpr::List(args) if args.is_empty() => {}
-        _ => return Err(Error::unsupported("only 0-arity define-fun is supported")),
+    let name = atom(&list[1])?.to_owned();
+    let params = parse_function_params(&list[2])?;
+    if params.is_empty() {
+        return define_const(
+            state,
+            &[
+                list[0].clone(),
+                list[1].clone(),
+                list[3].clone(),
+                list[4].clone(),
+            ],
+        );
     }
-    define_const(
-        state,
-        &[
-            list[0].clone(),
-            list[1].clone(),
-            list[3].clone(),
-            list[4].clone(),
-        ],
-    )
+    let result = parse_sort(&list[3])?;
+    state.functions.insert(
+        name,
+        FunctionBinding {
+            params,
+            result,
+            body: list[4].clone(),
+        },
+    );
+    Ok(())
+}
+
+fn parse_function_params(expr: &SExpr) -> Result<Vec<(String, SmtSort)>> {
+    let SExpr::List(args) = expr else {
+        return Err(Error::invalid("define-fun", "expected argument list"));
+    };
+    let mut params = Vec::with_capacity(args.len());
+    for arg in args {
+        let SExpr::List(pair) = arg else {
+            return Err(Error::invalid("define-fun", "argument is not a pair"));
+        };
+        if pair.len() != 2 {
+            return Err(Error::invalid(
+                "define-fun",
+                "argument pair must have name and sort",
+            ));
+        }
+        params.push((atom(&pair[0])?.to_owned(), parse_sort(&pair[1])?));
+    }
+    Ok(params)
 }
 
 fn push_command(state: &mut ScriptState, list: &[SExpr]) -> Result<()> {
@@ -367,6 +405,9 @@ fn parse_list_expr(
         return parse_indexed_literal(state, items);
     }
     let op = atom(&items[0])?;
+    if state.functions.contains_key(op) {
+        return parse_function_call(state, op, &items[1..], locals);
+    }
     match op {
         "!" => parse_expr_with_locals(state, &items[1], locals),
         "let" => parse_let(state, items, locals),
@@ -380,12 +421,15 @@ fn parse_list_expr(
         "xor" => binary_bool(state, items, locals, |b, a, c| b.bool_xor(a, c)),
         "bvnot" => unary_bv(state, items, locals, |b, x| b.bv_not(x)),
         "bvneg" => unary_bv(state, items, locals, |b, x| b.bv_neg(x)),
-        "bvand" => binary_bv(state, items, locals, |b, a, c| b.bv_and(a, c)),
-        "bvor" => binary_bv(state, items, locals, |b, a, c| b.bv_or(a, c)),
-        "bvxor" => binary_bv(state, items, locals, |b, a, c| b.bv_xor(a, c)),
-        "bvadd" => binary_bv(state, items, locals, |b, a, c| b.bv_add(a, c)),
+        "bvand" => fold_bv(state, items, locals, |b, a, c| b.bv_and(a, c)),
+        "bvnand" => inverted_fold_bv(state, items, locals, |b, a, c| b.bv_and(a, c)),
+        "bvor" => fold_bv(state, items, locals, |b, a, c| b.bv_or(a, c)),
+        "bvnor" => inverted_fold_bv(state, items, locals, |b, a, c| b.bv_or(a, c)),
+        "bvxor" => fold_bv(state, items, locals, |b, a, c| b.bv_xor(a, c)),
+        "bvxnor" => inverted_fold_bv(state, items, locals, |b, a, c| b.bv_xor(a, c)),
+        "bvadd" => fold_bv(state, items, locals, |b, a, c| b.bv_add(a, c)),
         "bvsub" => binary_bv(state, items, locals, |b, a, c| b.bv_sub(a, c)),
-        "bvmul" => binary_bv(state, items, locals, |b, a, c| b.bv_mul(a, c)),
+        "bvmul" => fold_bv(state, items, locals, |b, a, c| b.bv_mul(a, c)),
         "bvudiv" => binary_bv(state, items, locals, |b, a, c| b.bv_udiv(a, c)),
         "bvurem" => binary_bv(state, items, locals, |b, a, c| b.bv_urem(a, c)),
         "bvsdiv" => binary_bv(state, items, locals, |b, a, c| b.bv_sdiv(a, c)),
@@ -394,6 +438,7 @@ fn parse_list_expr(
         "bvshl" => binary_bv(state, items, locals, |b, a, c| b.bv_shl(a, c)),
         "bvlshr" => binary_bv(state, items, locals, |b, a, c| b.bv_lshr(a, c)),
         "bvashr" => binary_bv(state, items, locals, |b, a, c| b.bv_ashr(a, c)),
+        "bvcomp" => bvcomp_bv(state, items, locals),
         "concat" => concat_bv(state, items, locals),
         "bvult" => bv_cmp(state, items, locals, |b, a, c| b.bv_ult(a, c)),
         "bvule" => bv_cmp(state, items, locals, |b, a, c| b.bv_ule(a, c)),
@@ -413,6 +458,38 @@ fn parse_list_expr(
         "bvnego" | "nego" => unary_overflow(state, items, locals, |b, x| b.neg_ovf(x)),
         other => Err(Error::unsupported(format!("SMT-LIB operator {other}"))),
     }
+}
+
+fn parse_function_call(
+    state: &mut ScriptState,
+    name: &str,
+    args: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+) -> Result<Binding> {
+    let function = state
+        .functions
+        .get(name)
+        .cloned()
+        .ok_or_else(|| Error::invalid("function call", format!("undefined function {name}")))?;
+    if args.len() != function.params.len() {
+        return Err(Error::invalid(
+            "function call",
+            format!(
+                "function {name} expects {} arguments, got {}",
+                function.params.len(),
+                args.len()
+            ),
+        ));
+    }
+    let mut expanded_locals = locals.clone();
+    for ((param_name, param_sort), arg_expr) in function.params.iter().zip(args) {
+        let value = parse_expr_with_locals(state, arg_expr, locals)?;
+        expect_sort(value.sort, *param_sort, "function argument")?;
+        expanded_locals.insert(param_name.clone(), value);
+    }
+    let value = parse_expr_with_locals(state, &function.body, &mut expanded_locals)?;
+    expect_sort(value.sort, function.result, "function result")?;
+    Ok(value)
 }
 
 fn parse_ite(
@@ -549,22 +626,22 @@ fn parse_equals(
     args: &[SExpr],
     locals: &mut HashMap<String, Binding>,
 ) -> Result<Binding> {
-    if args.len() != 2 {
-        return Err(Error::invalid("=", "expected two arguments"));
+    if args.len() < 2 {
+        return Err(Error::invalid("=", "expected at least two arguments"));
     }
-    let a = parse_expr_with_locals(state, &args[0], locals)?;
-    let b = parse_expr_with_locals(state, &args[1], locals)?;
-    match (a.sort, b.sort) {
-        (SmtSort::Bool, SmtSort::Bool) => Ok(Binding {
-            node: state.builder.bool_eq(a.node, b.node)?,
-            sort: SmtSort::Bool,
-        }),
-        (SmtSort::Bv(w1), SmtSort::Bv(w2)) if w1 == w2 => Ok(Binding {
-            node: state.builder.bv_eq(a.node, b.node)?,
-            sort: SmtSort::Bool,
-        }),
-        _ => Err(Error::invalid("=", "argument sorts differ")),
+    let values = args
+        .iter()
+        .map(|arg| parse_expr_with_locals(state, arg, locals))
+        .collect::<Result<Vec<_>>>()?;
+    let mut result = state.builder.bool_true()?;
+    for pair in values.windows(2) {
+        let eq = equality_node(state, &pair[0], &pair[1], "=")?;
+        result = state.builder.bool_and(result, eq)?;
     }
+    Ok(Binding {
+        node: result,
+        sort: SmtSort::Bool,
+    })
 }
 
 fn parse_distinct(
@@ -572,16 +649,41 @@ fn parse_distinct(
     args: &[SExpr],
     locals: &mut HashMap<String, Binding>,
 ) -> Result<Binding> {
-    if args.len() != 2 {
-        return Err(Error::unsupported(
-            "distinct currently supports exactly two arguments",
+    if args.len() < 2 {
+        return Err(Error::invalid(
+            "distinct",
+            "expected at least two arguments",
         ));
     }
-    let eq = parse_equals(state, args, locals)?;
+    let values = args
+        .iter()
+        .map(|arg| parse_expr_with_locals(state, arg, locals))
+        .collect::<Result<Vec<_>>>()?;
+    let mut result = state.builder.bool_true()?;
+    for i in 0..values.len() {
+        for j in (i + 1)..values.len() {
+            let eq = equality_node(state, &values[i], &values[j], "distinct")?;
+            let ne = state.builder.bool_not(eq)?;
+            result = state.builder.bool_and(result, ne)?;
+        }
+    }
     Ok(Binding {
-        node: state.builder.bool_not(eq.node)?,
+        node: result,
         sort: SmtSort::Bool,
     })
+}
+
+fn equality_node(
+    state: &mut ScriptState,
+    a: &Binding,
+    b: &Binding,
+    context: &'static str,
+) -> Result<TermId> {
+    match (a.sort, b.sort) {
+        (SmtSort::Bool, SmtSort::Bool) => state.builder.bool_eq(a.node, b.node),
+        (SmtSort::Bv(w1), SmtSort::Bv(w2)) if w1 == w2 => state.builder.bv_eq(a.node, b.node),
+        _ => Err(Error::invalid(context, "argument sorts differ")),
+    }
 }
 
 fn unary_bool(
@@ -669,15 +771,81 @@ fn binary_bv(
     expect_len(items, 3, "binary BV")?;
     let a = parse_expr_with_locals(state, &items[1], locals)?;
     let b = parse_expr_with_locals(state, &items[2], locals)?;
+    binary_bv_bindings(state, a, b, f, "binary BV")
+}
+
+fn fold_bv(
+    state: &mut ScriptState,
+    items: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+    f: fn(&mut Builder, TermId, TermId) -> Result<TermId>,
+) -> Result<Binding> {
+    if items.len() < 2 {
+        return Err(Error::invalid("BV fold", "expected at least one argument"));
+    }
+    let mut cur = parse_expr_with_locals(state, &items[1], locals)?;
+    let SmtSort::Bv(_) = cur.sort else {
+        return Err(Error::invalid("BV fold", "argument is not BV"));
+    };
+    for item in &items[2..] {
+        let next = parse_expr_with_locals(state, item, locals)?;
+        cur = binary_bv_bindings(state, cur, next, f, "BV fold")?;
+    }
+    Ok(cur)
+}
+
+fn inverted_fold_bv(
+    state: &mut ScriptState,
+    items: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+    f: fn(&mut Builder, TermId, TermId) -> Result<TermId>,
+) -> Result<Binding> {
+    let value = fold_bv(state, items, locals, f)?;
+    Ok(Binding {
+        node: state.builder.bv_not(value.node)?,
+        sort: value.sort,
+    })
+}
+
+fn binary_bv_bindings(
+    state: &mut ScriptState,
+    a: Binding,
+    b: Binding,
+    f: fn(&mut Builder, TermId, TermId) -> Result<TermId>,
+    context: &'static str,
+) -> Result<Binding> {
     let (SmtSort::Bv(w1), SmtSort::Bv(w2)) = (a.sort, b.sort) else {
-        return Err(Error::invalid("binary BV", "argument is not BV"));
+        return Err(Error::invalid(context, "argument is not BV"));
     };
     if w1 != w2 {
-        return Err(Error::invalid("binary BV", "width mismatch"));
+        return Err(Error::invalid(context, "width mismatch"));
     }
     Ok(Binding {
         node: f(&mut state.builder, a.node, b.node)?,
         sort: SmtSort::Bv(w1),
+    })
+}
+
+fn bvcomp_bv(
+    state: &mut ScriptState,
+    items: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+) -> Result<Binding> {
+    expect_len(items, 3, "bvcomp")?;
+    let a = parse_expr_with_locals(state, &items[1], locals)?;
+    let b = parse_expr_with_locals(state, &items[2], locals)?;
+    let (SmtSort::Bv(w1), SmtSort::Bv(w2)) = (a.sort, b.sort) else {
+        return Err(Error::invalid("bvcomp", "argument is not BV"));
+    };
+    if w1 != w2 {
+        return Err(Error::invalid("bvcomp", "width mismatch"));
+    }
+    let eq = state.builder.bv_eq(a.node, b.node)?;
+    let one = state.builder.bv_const(1, 1)?;
+    let zero = state.builder.bv_const(0, 1)?;
+    Ok(Binding {
+        node: state.builder.bv_ite(eq, one, zero)?,
+        sort: SmtSort::Bv(1),
     })
 }
 

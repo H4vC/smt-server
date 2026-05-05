@@ -4,6 +4,8 @@ use crate::config::SatBackendKind;
 use crate::error::Error;
 use varisat::ExtendFormula;
 
+const BUDGETED_SPLR_CLAUSE_LIMIT: usize = 250_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SatResult {
     Sat(Vec<bool>), // 1-based CNF variable values are returned at index var-1
@@ -22,6 +24,11 @@ pub fn solve_cnf(
         return SatResult::Unknown("budget exhausted".to_owned());
     }
     match backend {
+        SatBackendKind::Splr
+            if deadline.is_some() && clauses.len() > BUDGETED_SPLR_CLAUSE_LIMIT =>
+        {
+            DpllSolver::new(num_vars, clauses, deadline).solve(assumptions)
+        }
         SatBackendKind::Splr => solve_with_splr(num_vars, clauses, assumptions, deadline),
         SatBackendKind::Varisat => solve_with_varisat(num_vars, clauses, assumptions, deadline),
         SatBackendKind::Dpll => DpllSolver::new(num_vars, clauses, deadline).solve(assumptions),
@@ -77,6 +84,20 @@ fn solve_with_varisat(
 }
 
 fn solve_with_splr(
+    num_vars: usize,
+    clauses: Vec<Vec<i32>>,
+    assumptions: &[i32],
+    deadline: Option<Instant>,
+) -> SatResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solve_with_splr_inner(num_vars, clauses, assumptions, deadline)
+    })) {
+        Ok(result) => result,
+        Err(_) => SatResult::Unknown("splr backend panicked".to_owned()),
+    }
+}
+
+fn solve_with_splr_inner(
     num_vars: usize,
     mut clauses: Vec<Vec<i32>>,
     assumptions: &[i32],

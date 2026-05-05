@@ -164,4 +164,5 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 - `clients/cpp` — C++17 single-header client helper
 - `docs/smt-wire-format-plan.md` — detailed binary wire-format plan
 - `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates
+- `docs/qfbvsmtrs-corpus-results.md` — latest SMT-LIB QF_BV corpus-run results
 - `docs` — backend notes and evaluation details
