@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use smt_server::{serve_tcp, BinbitBackend, RacingBackend, ServerConfig, Z3Backend};
+use smt_server::{
+    serve_tcp, BinbitBackend, QfbvsmtrsBackend, RacingBackend, ServerConfig, Z3Backend,
+};
 
 fn main() -> std::io::Result<()> {
     let addr = std::env::args()
@@ -9,7 +11,8 @@ fn main() -> std::io::Result<()> {
     let backend = Arc::new(RacingBackend::new(vec![
         Arc::new(Z3Backend),
         Arc::new(BinbitBackend),
+        Arc::new(QfbvsmtrsBackend),
     ]));
-    eprintln!("smt-server listening on {addr} with racing backend (z3 crate + binbit)");
+    eprintln!("smt-server listening on {addr} with racing backend (z3 crate + binbit + qfbvsmtrs)");
     serve_tcp(addr, ServerConfig::new(backend))
 }

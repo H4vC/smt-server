@@ -3,7 +3,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
-use smt_server::{handle_binary_frame, serve_tcp, BinbitBackend, ServerConfig, Z3Backend};
+use smt_server::{
+    handle_binary_frame, serve_tcp, BinbitBackend, QfbvsmtrsBackend, ServerConfig, Z3Backend,
+};
 use smt_wire::{
     le, response_flags, status, BinaryResponse, ExprBuilder, ModelBlock, NodeRef, Status,
     UnsatCoreBlock,
@@ -78,6 +80,73 @@ fn z3_backend_solves_sat_with_model() {
         .unwrap();
     assert_eq!(x_entry.value.width, 4);
     assert_eq!(x_entry.value.bytes, vec![3]);
+}
+
+#[test]
+fn qfbvsmtrs_backend_solves_sat_with_model() {
+    let mut builder = ExprBuilder::new();
+    let x = builder.bv_var("x", 4).unwrap();
+    let one = builder.bv_const(1, 4).unwrap();
+    let sum = builder.bv_add(x, one).unwrap();
+    let three = builder.bv_const(3, 4).unwrap();
+    let eq = builder.bv_eq(sum, three).unwrap();
+    builder.assert(eq).unwrap();
+    let request = builder.build_solve_request(15, 0, true, false).unwrap();
+
+    let response = handle_binary_frame(&request, &QfbvsmtrsBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Sat);
+    let model = ModelBlock::decode(&response.payload).unwrap();
+    let x_entry = model
+        .entries
+        .iter()
+        .find(|entry| entry.node_ref == NodeRef::bv(0).unwrap())
+        .unwrap();
+    assert_eq!(x_entry.value.width, 4);
+    assert_eq!(x_entry.value.bytes, vec![2]);
+}
+
+#[test]
+fn qfbvsmtrs_backend_solves_unsat_with_named_core() {
+    let mut builder = ExprBuilder::new();
+    let p = builder.bool_var("p").unwrap();
+    let not_p = builder.bool_not(p).unwrap();
+    builder.assert_named("p-is-true", p).unwrap();
+    builder.assert_named("p-is-false", not_p).unwrap();
+    let request = builder.build_solve_request(17, 0, false, true).unwrap();
+
+    let response = handle_binary_frame(&request, &QfbvsmtrsBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Unsat);
+    assert_eq!(response.envelope.flags, response_flags::HAS_CORE);
+    let core = UnsatCoreBlock::decode(&response.payload).unwrap();
+    assert_eq!(core.names, vec!["p-is-true", "p-is-false"]);
+}
+
+#[test]
+fn qfbvsmtrs_backend_solves_unsat() {
+    let mut builder = ExprBuilder::new();
+    let x = builder.bv_var("x", 4).unwrap();
+    let one = builder.bv_const(1, 4).unwrap();
+    let two = builder.bv_const(2, 4).unwrap();
+    let eq_one = builder.bv_eq(x, one).unwrap();
+    let eq_two = builder.bv_eq(x, two).unwrap();
+    builder.assert(eq_one).unwrap();
+    builder.assert(eq_two).unwrap();
+    let request = builder.build_solve_request(16, 0, false, false).unwrap();
+
+    let response = handle_binary_frame(&request, &QfbvsmtrsBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Unsat);
 }
 
 #[test]

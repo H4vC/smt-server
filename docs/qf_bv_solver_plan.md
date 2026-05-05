@@ -291,10 +291,10 @@ Initial feature policy should be conservative:
 |---|---|
 | `Command::Solve` | supported once bit-blaster + SAT are ready |
 | `Command::Simplify` | identity `SimplifyBlock` passthrough |
-| `Command::Minimize` / `Maximize` | `Unknown("qfbvsmtrs optimization unsupported")` until bit-hunt optimization is added |
+| `Command::Minimize` / `Maximize` | supported with bit-hunt optimization over SAT queries |
 | `WANT_MODEL` | supported for SAT by reading primary-input assignments |
 | `assumption_roots` | supported by conjoining assumptions initially; later use SAT assumptions |
-| `WANT_CORE` | if SAT, return SAT normally; if UNSAT before core support, return `Unknown` rather than `Unsat(None)` so the racing layer can wait for Z3/binbit to produce a core |
+| `WANT_CORE` | supported for named assertions via deletion-based unsat-core minimization |
 | `budget_ms != 0` | enforce with SAT timeout/time checks or return `Unknown`; do not silently exceed the requested budget |
 
 This phase reserves the standalone SMT-LIB API immediately. The implementation can be thin at first, but the crate ownership boundary should be clear: `qfbvsmtrs` owns its parser/IR/solver; `smt-server` only adapts wire requests and wire responses.

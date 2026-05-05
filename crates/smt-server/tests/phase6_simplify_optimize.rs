@@ -1,4 +1,4 @@
-use smt_server::{handle_binary_frame, BinbitBackend, Z3Backend};
+use smt_server::{handle_binary_frame, BinbitBackend, QfbvsmtrsBackend, Z3Backend};
 use smt_wire::{
     response_flags, BinaryResponse, ExprBuilder, OptimizationValueBlock, SimplifyBlock, Status,
 };
@@ -106,6 +106,38 @@ fn signed_optimization_uses_signed_ordering_and_can_return_model() {
     let optimum = OptimizationValueBlock::decode(&response.payload, false).unwrap();
     // 4-bit signed maximum is +7.
     assert_eq!(optimum.optimum.bytes, vec![7]);
+}
+
+#[test]
+fn qfbvsmtrs_backend_optimization_uses_bit_hunt() {
+    let mut builder = ExprBuilder::new();
+    let x = builder.bv_var("x", 4).unwrap();
+    let five = builder.bv_const(5, 4).unwrap();
+    let ge = builder.bv_uge(x, five).unwrap();
+    builder.assert(ge).unwrap();
+    let request = builder
+        .build_minimize_request(27, x, false, 0, true)
+        .unwrap();
+    let response = BinaryResponse::parse(
+        &handle_binary_frame(&request, &QfbvsmtrsBackend)
+            .unwrap()
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response.envelope.status, Status::Sat);
+    assert_eq!(
+        response.envelope.flags,
+        response_flags::HAS_VALUE | response_flags::HAS_MODEL
+    );
+    let optimum = OptimizationValueBlock::decode(&response.payload, true).unwrap();
+    assert_eq!(optimum.optimum.bytes, vec![5]);
+    assert!(optimum
+        .model
+        .unwrap()
+        .entries
+        .iter()
+        .any(|entry| entry.value.bytes == vec![5]));
 }
 
 #[test]

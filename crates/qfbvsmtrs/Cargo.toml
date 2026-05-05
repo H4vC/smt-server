@@ -1,0 +1,15 @@
+[package]
+name = "qfbvsmtrs"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone pure-Rust QF_BV SMT solver via bit-blasting"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+wire = ["dep:smt-wire"]
+
+[dependencies]
+dashu = { version = "0.4.2", features = ["num-traits"] }
+smt-wire = { path = "../smt-wire", optional = true }
+yaspar = "2.7.0"

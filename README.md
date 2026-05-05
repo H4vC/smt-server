@@ -5,7 +5,7 @@ A small SMT solving server and wire-format toolkit for bit-vector and Boolean fo
 The project provides:
 
 - a TCP server that accepts either the project binary wire format or SMT-LIB text frames
-- native solver backends using the Rust `z3` crate and `binbit`, raced by default
+- native solver backends using the Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate, raced by default
 - a Rust wire-format crate (`smt-wire`) with a blocking TCP client
 - single-file Python and C++ client helpers for building requests, sending them, and decoding responses
 
@@ -114,6 +114,14 @@ auto response = client.send_request(request);
 
 On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` if you use `TcpClient`.
 
+## Standalone qfbvsmtrs CLI
+
+```sh
+cargo run -p qfbvsmtrs -- path/to/query.smt2
+```
+
+If no path is supplied, `qfbvsmtrs` reads SMT-LIB from stdin.
+
 ## Test
 
 ```sh
@@ -133,6 +141,7 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 ## Repository layout
 
 - `crates/smt-wire` — Rust wire-format types, builders, codecs, and validators
+- `crates/qfbvsmtrs` — standalone pure-Rust QF_BV bit-blasting solver crate and CLI
 - `crates/smt-server` — TCP server, backend integration, SMT-LIB frontend
 - `clients/python` — Python single-file client helper
 - `clients/cpp` — C++17 single-header client helper
