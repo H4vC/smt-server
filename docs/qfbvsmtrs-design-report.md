@@ -268,9 +268,15 @@ Corpus tooling lives in `scripts/qfbvsmtrs_corpus.py` and supports:
 - append-only JSONL reports;
 - resumable execution;
 - merged latest-by-path baselines;
-- skipping known-good files;
-- family/path filters;
-- rerunning only selected result kinds.
+- skipping known-good files and prior attempt logs;
+- family/path filters, including normalized forward-slash matching on Windows reports;
+- rerunning only selected result kinds;
+- improvement-only official reports via `--record-ok-only` / `--record-kinds`;
+- separate `--attempt-report` logs for all attempted cases;
+- `--exclude-report` inputs to prevent redundant slow exploratory reruns;
+- queue ordering by path, baseline elapsed time, or file size;
+- baseline elapsed-time filters for fast/slow segregation;
+- wall-clock submission caps with `--max-wall-seconds` while keeping per-file process `--timeout` as the hard worker guardrail.
 
 ## Testing and validation design
 
@@ -285,12 +291,13 @@ The validation strategy combines several layers:
 7. **Fuzz harness** for parser-to-solver pipeline robustness.
 8. **Full SMT-LIB corpus runner** for broad conformance/performance triage.
 
-The current strongest evidence is: zero parser/backend errors and zero wrong conclusive answers in the latest merged SMT-LIB corpus reports. The main remaining gap is non-conclusive coverage.
+The current strongest evidence is: zero parser/backend errors and zero wrong conclusive answers in the latest merged SMT-LIB corpus reports: `39,000` conclusive matches, `7,175` `unknown`, and `16` process timeouts across `46,191` SMT-LIB 2025 QF_BV files. The main remaining gap is non-conclusive coverage in hard SAT/preprocessing-heavy families.
 
 ## Known limitations
 
 - Not production-complete for arbitrary QF_BV corpus workloads yet.
-- Latest merged corpus still has `10,048` `unknown` and `1,816` timeout results under strict budgets.
+- Latest merged corpus still has `7,175` `unknown` and `16` timeout results under strict/targeted budgets.
+- The remaining tail is concentrated in `Sage2` (`4,701`), `asp` (`465`), `spear` (`407`), `20210219-Sydr` (`344`), `uclid`/`uclid_contrib` (`233`), `20210312-Bouvier` (`200`), `float` (`191`), and smaller arithmetic/BMC families.
 - No arrays, floating point, quantifiers, or uninterpreted functions.
 - Full no-budget corpus proof is not done.
 - Full-corpus Z3 differential testing is not done.

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import collections
 import concurrent.futures
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,12 @@ def relpath(root: Path, path: Path) -> str:
     return str(path.relative_to(root))
 
 
+def normalized_relpath(rel: str) -> str:
+    # Make filters portable: reports keep the platform path spelling, but users
+    # commonly type corpus filters with forward slashes.
+    return rel.replace("\\", "/")
+
+
 def parse_kind_set(text: str | None) -> set[str] | None:
     if text is None:
         return None
@@ -76,6 +83,14 @@ def load_latest_by_path(reports: list[Path]) -> dict[str, dict]:
         for record in iter_report_records(report):
             latest[record["path"]] = record
     return latest
+
+
+def load_path_set(reports: list[Path]) -> set[str]:
+    paths: set[str] = set()
+    for report in reports:
+        for record in iter_report_records(report):
+            paths.add(record["path"])
+    return paths
 
 
 def run_one(
@@ -153,8 +168,10 @@ def write_summary(
     baseline_reports: list[Path],
     summary_mode: str,
     queued: int,
+    submitted: int,
     skipped: collections.Counter[str],
     record_kinds: set[str],
+    extra: dict,
 ) -> None:
     if summary_mode == "merged":
         latest = load_latest_by_path([*baseline_reports, report])
@@ -169,8 +186,10 @@ def write_summary(
         {
             "report": str(report),
             "queued_this_run": queued,
+            "submitted_this_run": submitted,
             "skipped_this_run": dict(skipped),
             "record_kinds": sorted(record_kinds),
+            **extra,
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +218,24 @@ def main() -> int:
         help="previous report used for incremental selection; can be repeated",
     )
     parser.add_argument(
+        "--exclude-report",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "report(s) whose paths should be skipped regardless of kind; useful "
+            "for experimental attempt logs that should not be folded into the official baseline"
+        ),
+    )
+    parser.add_argument(
+        "--attempt-report",
+        type=Path,
+        help=(
+            "append every attempted result to this separate JSONL report, even when "
+            "--record-kinds/--record-ok-only filters the main report"
+        ),
+    )
+    parser.add_argument(
         "--skip-kinds",
         default="ok",
         help="comma-separated baseline kinds to skip, default: ok",
@@ -221,6 +258,30 @@ def main() -> int:
         "--limit",
         type=int,
         help="queue at most this many files after filtering (useful for sampled increments)",
+    )
+    parser.add_argument(
+        "--min-baseline-elapsed",
+        type=float,
+        help="only queue files whose latest baseline elapsed time is at least this many seconds",
+    )
+    parser.add_argument(
+        "--max-baseline-elapsed",
+        type=float,
+        help="only queue files whose latest baseline elapsed time is at most this many seconds",
+    )
+    parser.add_argument(
+        "--sort-by",
+        choices=["path", "baseline-elapsed-asc", "baseline-elapsed-desc", "bytes-asc", "bytes-desc"],
+        default="path",
+        help="queue ordering after filtering; useful for segregating fast/slow reruns",
+    )
+    parser.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        help=(
+            "stop submitting new files after this wall-clock time; already running "
+            "workers are allowed to finish under their per-file --timeout"
+        ),
     )
     parser.add_argument("--list-only", action="store_true", help="print selection summary and exit")
     parser.add_argument(
@@ -258,6 +319,8 @@ def main() -> int:
     record_kinds = {"ok"} if args.record_ok_only else parse_kind_set(args.record_kinds)
     if not record_kinds:
         raise SystemExit("--record-kinds must contain at least one kind")
+    if args.attempt_report and args.attempt_report.resolve() == args.report.resolve():
+        raise SystemExit("--attempt-report must be different from --report")
 
     skip_kinds = parse_kind_set(args.skip_kinds) or set()
     rerun_kinds = parse_kind_set(args.rerun_kinds)
@@ -266,6 +329,8 @@ def main() -> int:
     root = args.root.resolve()
     all_files = sorted(root.rglob("*.smt2"))
     output_seen = {record["path"] for record in iter_report_records(args.report)}
+    attempt_seen = load_path_set([args.attempt_report]) if args.attempt_report else set()
+    excluded = load_path_set(args.exclude_report)
     baseline = load_latest_by_path(args.baseline_report)
 
     queued_files: list[Path] = []
@@ -275,10 +340,19 @@ def main() -> int:
         if rel in output_seen:
             skipped["already-in-output-report"] += 1
             continue
-        if args.path_contains and not any(text in rel for text in args.path_contains):
+        if rel in attempt_seen:
+            skipped["already-in-attempt-report"] += 1
+            continue
+        if rel in excluded:
+            skipped["excluded-report"] += 1
+            continue
+        rel_norm = normalized_relpath(rel)
+        if args.path_contains and not any(
+            text in rel or text in rel_norm for text in args.path_contains
+        ):
             skipped["path-filter"] += 1
             continue
-        if path_regex and not path_regex.search(rel):
+        if path_regex and not (path_regex.search(rel) or path_regex.search(rel_norm)):
             skipped["path-filter"] += 1
             continue
         base = baseline.get(rel)
@@ -290,10 +364,39 @@ def main() -> int:
             if rerun_kinds is None and kind in skip_kinds:
                 skipped[f"baseline-kind-{kind}"] += 1
                 continue
+            if args.min_baseline_elapsed is not None or args.max_baseline_elapsed is not None:
+                elapsed = base.get("elapsed")
+                if elapsed is None:
+                    skipped["missing-baseline-elapsed"] += 1
+                    continue
+                elapsed = float(elapsed)
+                if args.min_baseline_elapsed is not None and elapsed < args.min_baseline_elapsed:
+                    skipped["baseline-elapsed-below-min"] += 1
+                    continue
+                if args.max_baseline_elapsed is not None and elapsed > args.max_baseline_elapsed:
+                    skipped["baseline-elapsed-above-max"] += 1
+                    continue
         elif rerun_kinds is not None:
             skipped["missing-from-baseline"] += 1
             continue
+        elif args.min_baseline_elapsed is not None or args.max_baseline_elapsed is not None:
+            skipped["missing-from-baseline"] += 1
+            continue
         queued_files.append(path)
+
+    def queue_sort_key(path: Path):
+        rel = relpath(root, path)
+        if args.sort_by == "baseline-elapsed-asc":
+            return (float(baseline.get(rel, {}).get("elapsed", float("inf"))), rel)
+        if args.sort_by == "baseline-elapsed-desc":
+            return (-float(baseline.get(rel, {}).get("elapsed", float("-inf"))), rel)
+        if args.sort_by == "bytes-asc":
+            return (path.stat().st_size, rel)
+        if args.sort_by == "bytes-desc":
+            return (-path.stat().st_size, rel)
+        return (rel,)
+
+    queued_files.sort(key=queue_sort_key)
 
     if args.limit is not None:
         skipped["over-limit"] += max(0, len(queued_files) - args.limit)
@@ -307,8 +410,12 @@ def main() -> int:
                 "queued": len(queued_files),
                 "skipped": dict(skipped),
                 "baseline_reports": [str(path) for path in args.baseline_report],
+                "exclude_reports": [str(path) for path in args.exclude_report],
+                "attempt_report": str(args.attempt_report) if args.attempt_report else None,
                 "output_report": str(args.report),
                 "record_kinds": sorted(record_kinds),
+                "sort_by": args.sort_by,
+                "max_wall_seconds": args.max_wall_seconds,
             },
             sort_keys=True,
         ),
@@ -319,44 +426,99 @@ def main() -> int:
 
     counts: collections.Counter[str] = collections.Counter()
     started = time.time()
+    submitted = 0
+    completed = 0
+    stopped_by_wall_limit = False
     args.report.parent.mkdir(parents=True, exist_ok=True)
-    with args.report.open("a", encoding="utf-8") as report:
+    if args.attempt_report:
+        args.attempt_report.parent.mkdir(parents=True, exist_ok=True)
+
+    def can_submit_more() -> bool:
+        return args.max_wall_seconds is None or time.time() - started < args.max_wall_seconds
+
+    with contextlib.ExitStack() as stack:
+        report = stack.enter_context(args.report.open("a", encoding="utf-8"))
+        attempt_report = (
+            stack.enter_context(args.attempt_report.open("a", encoding="utf-8"))
+            if args.attempt_report
+            else None
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures = [
-                pool.submit(
-                    run_one,
-                    root,
-                    args.exe,
-                    args.budget_ms,
-                    args.timeout,
-                    args.sat_backend,
-                    path,
-                )
-                for path in queued_files
-            ]
-            for done, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-                record = future.result()
-                counts[record["kind"]] += 1
-                if record["kind"] in record_kinds:
-                    report.write(json.dumps(record) + "\n")
-                    report.flush()
-                if done % 500 == 0 or record["kind"] not in ("ok",):
-                    print(
-                        done,
-                        "/",
-                        len(queued_files),
-                        dict(counts),
-                        "last",
-                        record["kind"],
-                        record["expected"],
-                        record["result"],
-                        f"{record['elapsed']:.2f}s",
-                        record["path"][:100],
-                        "elapsed",
-                        f"{time.time() - started:.1f}s",
-                        flush=True,
+            futures: dict[concurrent.futures.Future, Path] = {}
+
+            def submit_until_full() -> None:
+                nonlocal submitted, stopped_by_wall_limit
+                while submitted < len(queued_files) and len(futures) < args.workers:
+                    if not can_submit_more():
+                        stopped_by_wall_limit = True
+                        return
+                    path = queued_files[submitted]
+                    submitted += 1
+                    future = pool.submit(
+                        run_one,
+                        root,
+                        args.exe,
+                        args.budget_ms,
+                        args.timeout,
+                        args.sat_backend,
+                        path,
                     )
-    print("done", dict(counts), "elapsed", time.time() - started)
+                    futures[future] = path
+
+            submit_until_full()
+            while futures:
+                done_set, _ = concurrent.futures.wait(
+                    futures,
+                    timeout=1.0,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not done_set:
+                    if not can_submit_more():
+                        stopped_by_wall_limit = True
+                    continue
+                for future in done_set:
+                    futures.pop(future, None)
+                    record = future.result()
+                    completed += 1
+                    counts[record["kind"]] += 1
+                    if attempt_report is not None:
+                        attempt_report.write(json.dumps(record) + "\n")
+                        attempt_report.flush()
+                    if record["kind"] in record_kinds:
+                        report.write(json.dumps(record) + "\n")
+                        report.flush()
+                    if completed % 500 == 0 or record["kind"] not in ("ok",):
+                        print(
+                            completed,
+                            "/",
+                            len(queued_files),
+                            dict(counts),
+                            "last",
+                            record["kind"],
+                            record["expected"],
+                            record["result"],
+                            f"{record['elapsed']:.2f}s",
+                            record["path"][:100],
+                            "elapsed",
+                            f"{time.time() - started:.1f}s",
+                            flush=True,
+                        )
+                submit_until_full()
+
+    if submitted < len(queued_files):
+        skipped["not-submitted-wall-limit"] += len(queued_files) - submitted
+    print(
+        "done",
+        dict(counts),
+        "elapsed",
+        time.time() - started,
+        "submitted",
+        submitted,
+        "selected",
+        len(queued_files),
+        "stopped_by_wall_limit",
+        stopped_by_wall_limit,
+    )
 
     summary = args.summary
     if summary is None:
@@ -367,8 +529,18 @@ def main() -> int:
         args.baseline_report,
         args.summary_mode,
         len(queued_files),
+        submitted,
         skipped,
         record_kinds,
+        {
+            "exclude_reports": [str(path) for path in args.exclude_report],
+            "attempt_report": str(args.attempt_report) if args.attempt_report else None,
+            "sort_by": args.sort_by,
+            "min_baseline_elapsed": args.min_baseline_elapsed,
+            "max_baseline_elapsed": args.max_baseline_elapsed,
+            "max_wall_seconds": args.max_wall_seconds,
+            "stopped_by_wall_limit": stopped_by_wall_limit,
+        },
     )
     print("summary", summary, flush=True)
     return 0

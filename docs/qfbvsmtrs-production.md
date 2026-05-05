@@ -10,6 +10,19 @@
 
 Select a backend with `Config::with_sat_backend(SatBackendKind::...)`.
 
+## Production-complete bar
+
+For this solver, a practical production-complete claim means the supported QF_BV subset is sound, bounded, and regression-tested under documented limits:
+
+- no known wrong `sat`/`unsat` answers;
+- requested models validate, and unsupported/expensive artifacts fail cleanly or return `unknown`;
+- solver budgets, process timeouts, and memory-heavy failure modes are documented and respected;
+- unsupported SMT-LIB constructs are rejected instead of mis-solved;
+- remaining corpus `unknown`/timeout cases are either solved or explicitly accepted as outside the production guarantee;
+- `smt-server` integration handles `sat`, `unsat`, `unknown`, timeout, model, core, and optimization paths correctly while `qfbvsmtrs` remains standalone.
+
+Current status: sound controlled backend, not production-complete for arbitrary QF_BV corpus workloads because the merged SMT-LIB corpus tail is still `7,175` `unknown` plus `16` timeouts.
+
 ## Required local gates
 
 ```sh
@@ -37,4 +50,4 @@ See also:
 - `docs/qfbvsmtrs-design-report.md` for the solver architecture and design details.
 - `docs/qfbvsmtrs-corpus-results.md` for SMT-LIB QF_BV corpus command history.
 
-The corpus runs found no wrong conclusive answers. Latest merged targeted status is 35,519 conclusive matches, 8,953 `unknown`, and 1,719 timeouts, so the solver is not yet production-complete for arbitrary corpus workloads.
+The corpus runs found no wrong conclusive answers. Latest merged targeted status is 39,000 conclusive matches, 7,175 `unknown`, and 16 timeouts. The remaining tail is primarily hard SAT/preprocessing work: `Sage2`, `asp`, `spear`, `20210219-Sydr`, `uclid`, generated arithmetic/float-style cases, and BMC transition-system timeouts.

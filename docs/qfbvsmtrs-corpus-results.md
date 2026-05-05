@@ -110,17 +110,37 @@ Merged with the full baseline these targeted passes yield:
 
 ## Latest merged status
 
-Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `sage` app slices, `log-slicing` add/sub/comparison/shift cases, `brummayerbiere4`, `challenge`, Noetzli polynomial/algebraic rewrite cases, Bruttomesso extensional/LFSR/simple-processor cases, sampled `spear`, and `uclid`.
+Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `sage` app slices, `log-slicing` add/sub/comparison/shift cases, `brummayerbiere4`, `challenge`, Noetzli polynomial/algebraic rewrite cases, Bruttomesso extensional/LFSR/simple-processor cases, sampled/high-budget `spear` batches, `uclid`, and the final timeout sweep.
 
 Latest merged-by-path status across the full baseline and targeted reports currently stands at:
 
 | Class | Count |
 |---|---:|
-| Conclusive and matched `:status` | 35,519 |
-| Returned `unknown` against a known sat/unsat status | 8,953 |
-| Hit the hard process timeout | 1,719 |
+| Conclusive and matched `:status` | 39,000 |
+| Returned `unknown` against a known sat/unsat status | 7,175 |
+| Hit the hard process timeout | 16 |
 | Frontend/backend error | 0 |
 | Conclusive wrong answer | 0 |
+
+Remaining non-conclusive cases by category:
+
+| Category / family | Remaining | Kind split | Expected status split | Character |
+|---|---:|---:|---:|---|
+| `Sage2` | 4,701 | 4,700 unknown / 1 timeout | 2,773 sat / 1,928 unsat | Large generated BV/SAT instances; dominant hard tail. |
+| `asp` | 465 | 465 unknown | 347 sat / 118 unsat | Combinatorial puzzle encodings: N-Queens, TSP, Sokoban, graph coloring, routing, etc. |
+| `spear` | 407 | 407 unknown | 407 sat / 0 unsat | Symbolic-execution C VCs; remaining mainly `samba`, `inn`, `wget`, and `openldap`. |
+| `20210219-Sydr` | 344 | 344 unknown | 151 sat / 193 unsat | Symbolic-execution/path-constraint formulas, including symbolic memory. |
+| `uclid` + `uclid_contrib_smtcomp09` | 233 | 233 unknown | 224 sat / 9 unsat | Program/circuit verification constraints. |
+| `20210312-Bouvier` | 200 | 200 unknown | 100 sat / 100 unsat | Generated `vlsat3_*` cases. |
+| `float` | 191 | 191 unknown | 101 sat / 90 unsat | Floating-point-style arithmetic encoded as pure BV. |
+| `mcm` | 131 | 131 unknown | 98 sat / 33 unsat | Arithmetic/synthesis-style BV constraints. |
+| `20230221-oisc-gurtner` | 112 | 112 unknown | 12 sat / 100 unsat | OISC/program-transition style nested BV constraints. |
+| `brummayerbiere*` arithmetic/bit-hack families | 140 | 140 unknown | 14 sat / 126 unsat | Bit-hack, overflow, min/max, multiplication, and integer-root identities. |
+| `log-slicing` | 57 | 57 unknown | 0 sat / 57 unsat | Remaining division/remainder/multiplication equivalences. |
+| `bmc-bv` + `bmc-bv-svcomp14` | 32 | 18 unknown / 14 timeout | 7 sat / 25 unsat | BMC transition-system cases; includes most process timeouts. |
+| Other smaller families | 178 | 177 unknown / 1 timeout | 89 sat / 89 unsat | Smaller tails across p4dfa, grsbits, fmbench, calypto, RWS, fft, VS3, and other families. |
+
+The `16` process timeouts are concentrated in `bmc-bv-svcomp14` (`11`), `bmc-bv` (`3`), `Sage2/bench_9140.smt2` (`1`), and `2019-Mann/ridecore-qf_bv-bug.smt2` (`1`).
 
 See `docs/qfbvsmtrs-progress-report.md` for the current progress summary and `docs/qfbvsmtrs-design-report.md` for solver architecture.
 
@@ -161,7 +181,7 @@ python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
   --list-only
 ```
 
-For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 10,672 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
+For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 7,191 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
 
 Improvement-only experimental runs can avoid recording unknown/timeout regressions while still preserving solved cases:
 
@@ -176,3 +196,22 @@ python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
   --workers 8 \
   --record-ok-only
 ```
+
+For slower exploratory batches, keep the official report improvement-only but also write a separate attempt log. The attempt log records every result kind and can be excluded from later exploratory runs without folding unknown/timeout regressions into the official merged status:
+
+```sh
+python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
+  --baseline-report target/smtlib/qfbvsmtrs_corpus_merged_current_official.jsonl \
+  --exclude-report target/smtlib/qfbvsmtrs_corpus_attempt_spear_30s.jsonl \
+  --rerun-kinds unknown \
+  --path-contains spear \
+  --report target/smtlib/qfbvsmtrs_corpus_rerun_spear_30s_ok.jsonl \
+  --attempt-report target/smtlib/qfbvsmtrs_corpus_attempt_spear_30s.jsonl \
+  --record-ok-only \
+  --budget-ms 30000 \
+  --timeout 90 \
+  --workers 4 \
+  --max-wall-seconds 900
+```
+
+Use `--min-baseline-elapsed` / `--max-baseline-elapsed` and `--sort-by baseline-elapsed-asc` to split a family into fast/slow bins. Path filters match both the report's native path spelling and a normalized forward-slash spelling, so `--path-regex 'spear/(inn_v2\.4\.3|wget_v1\.10\.2)/'` works on Windows reports. `--timeout` is a per-file process timeout; total wall time is roughly `queued * min(budget, timeout) / workers` for batches that mostly return `unknown`, so use `--limit`, lower `--workers`, and `--max-wall-seconds` to keep exploratory runs bounded.
