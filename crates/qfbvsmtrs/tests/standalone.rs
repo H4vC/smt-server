@@ -1,4 +1,61 @@
-use qfbvsmtrs::{solve_smt2, Builder, Command, Config, ScalarValue, SolveStatus, Solver};
+use std::time::Duration;
+
+use qfbvsmtrs::{
+    solve_smt2, Builder, Command, Config, SatBackendKind, ScalarValue, SolveStatus, Solver,
+};
+
+#[test]
+fn all_sat_backends_solve_basic_sat_and_unsat() {
+    let sat = r#"
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(assert (= (bvadd x #x1) #x3))
+(check-sat)
+(get-model)
+"#;
+    let unsat = r#"
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(assert (= x #x1))
+(assert (= x #x2))
+(check-sat)
+"#;
+    for backend in [
+        SatBackendKind::Splr,
+        SatBackendKind::Varisat,
+        SatBackendKind::Dpll,
+    ] {
+        let config = Config::default().with_sat_backend(backend);
+        let sat_result = solve_smt2(sat, &config).unwrap();
+        assert_eq!(sat_result.status, SolveStatus::Sat, "{backend:?} SAT");
+        assert_eq!(
+            sat_result.model.unwrap().get("x"),
+            Some(&ScalarValue::Bv {
+                width: 4,
+                bytes: vec![2]
+            }),
+            "{backend:?} model"
+        );
+
+        let unsat_result = solve_smt2(unsat, &config).unwrap();
+        assert_eq!(unsat_result.status, SolveStatus::Unsat, "{backend:?} UNSAT");
+    }
+}
+
+#[test]
+fn varisat_reports_unknown_for_budgeted_solves() {
+    let script = r#"
+(set-logic QF_BV)
+(declare-const x (_ BitVec 4))
+(assert (= x #x1))
+(check-sat)
+"#;
+    let config = Config::default()
+        .with_sat_backend(SatBackendKind::Varisat)
+        .with_budget(Some(Duration::from_millis(10)));
+    let result = solve_smt2(script, &config).unwrap();
+    assert_eq!(result.status, SolveStatus::Unknown);
+}
 
 #[test]
 fn solves_simple_sat_with_model() {

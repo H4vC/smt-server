@@ -1,12 +1,140 @@
 use std::time::Instant;
 
+use crate::config::SatBackendKind;
 use crate::error::Error;
+use varisat::ExtendFormula;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SatResult {
     Sat(Vec<bool>), // 1-based CNF variable values are returned at index var-1
     Unsat,
     Unknown(String),
+}
+
+pub fn solve_cnf(
+    backend: SatBackendKind,
+    num_vars: usize,
+    clauses: Vec<Vec<i32>>,
+    assumptions: &[i32],
+    deadline: Option<Instant>,
+) -> SatResult {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return SatResult::Unknown("budget exhausted".to_owned());
+    }
+    match backend {
+        SatBackendKind::Splr => solve_with_splr(num_vars, clauses, assumptions, deadline),
+        SatBackendKind::Varisat => solve_with_varisat(num_vars, clauses, assumptions, deadline),
+        SatBackendKind::Dpll => DpllSolver::new(num_vars, clauses, deadline).solve(assumptions),
+    }
+}
+
+fn solve_with_varisat(
+    num_vars: usize,
+    clauses: Vec<Vec<i32>>,
+    assumptions: &[i32],
+    deadline: Option<Instant>,
+) -> SatResult {
+    if deadline.is_some() {
+        // Varisat's public library API has assumption support but no interrupt/timeout hook.
+        // Keep budgeted solves on backends that can poll or honor a time limit.
+        return SatResult::Unknown("varisat backend does not support deadlines".to_owned());
+    }
+
+    let mut formula = varisat::CnfFormula::new();
+    formula.set_var_count(num_vars);
+    for clause in &clauses {
+        let lits = clause
+            .iter()
+            .map(|&lit| varisat::Lit::from_dimacs(lit as isize))
+            .collect::<Vec<_>>();
+        formula.add_clause(&lits);
+    }
+
+    let mut solver = varisat::Solver::new();
+    solver.add_formula(&formula);
+    let assumption_lits = assumptions
+        .iter()
+        .map(|&lit| varisat::Lit::from_dimacs(lit as isize))
+        .collect::<Vec<_>>();
+    solver.assume(&assumption_lits);
+
+    match solver.solve() {
+        Ok(true) => {
+            let mut assignment = vec![false; num_vars];
+            if let Some(model) = solver.model() {
+                for lit in model {
+                    let index = lit.index();
+                    if index < assignment.len() {
+                        assignment[index] = lit.is_positive();
+                    }
+                }
+            }
+            SatResult::Sat(assignment)
+        }
+        Ok(false) => SatResult::Unsat,
+        Err(err) => SatResult::Unknown(format!("varisat error: {err}")),
+    }
+}
+
+fn solve_with_splr(
+    num_vars: usize,
+    mut clauses: Vec<Vec<i32>>,
+    assumptions: &[i32],
+    deadline: Option<Instant>,
+) -> SatResult {
+    for &assumption in assumptions {
+        clauses.push(vec![assumption]);
+    }
+
+    let mut config = splr::Config {
+        quiet_mode: true,
+        use_log: false,
+        show_journal: false,
+        ..splr::Config::default()
+    };
+    if let Some(deadline) = deadline {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return SatResult::Unknown("budget exhausted".to_owned());
+        };
+        config.c_timeout = remaining.as_secs_f64();
+    }
+
+    match splr::Solver::try_from((config, clauses.as_ref())) {
+        Ok(mut solver) => match splr::SolveIF::solve(&mut solver) {
+            Ok(splr::Certificate::SAT(model)) => {
+                let mut assignment = vec![false; num_vars];
+                for lit in model {
+                    let index = lit.unsigned_abs() as usize;
+                    if (1..=num_vars).contains(&index) {
+                        assignment[index - 1] = lit > 0;
+                    }
+                }
+                SatResult::Sat(assignment)
+            }
+            Ok(splr::Certificate::UNSAT) => SatResult::Unsat,
+            Err(splr::SolverError::EmptyClause)
+            | Err(splr::SolverError::Inconsistent)
+            | Err(splr::SolverError::RootLevelConflict(_)) => SatResult::Unsat,
+            Err(splr::SolverError::TimeOut) => SatResult::Unknown("budget exhausted".to_owned()),
+            Err(err) => SatResult::Unknown(format!("splr error: {err}")),
+        },
+        Err(Ok(splr::Certificate::UNSAT)) => SatResult::Unsat,
+        Err(Ok(splr::Certificate::SAT(model))) => {
+            let mut assignment = vec![false; num_vars];
+            for lit in model {
+                let index = lit.unsigned_abs() as usize;
+                if (1..=num_vars).contains(&index) {
+                    assignment[index - 1] = lit > 0;
+                }
+            }
+            SatResult::Sat(assignment)
+        }
+        Err(Err(splr::SolverError::EmptyClause))
+        | Err(Err(splr::SolverError::Inconsistent))
+        | Err(Err(splr::SolverError::RootLevelConflict(_))) => SatResult::Unsat,
+        Err(Err(splr::SolverError::TimeOut)) => SatResult::Unknown("budget exhausted".to_owned()),
+        Err(Err(err)) => SatResult::Unknown(format!("splr error: {err}")),
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -394,7 +394,7 @@ fn parse_list_expr(
         "bvshl" => binary_bv(state, items, locals, |b, a, c| b.bv_shl(a, c)),
         "bvlshr" => binary_bv(state, items, locals, |b, a, c| b.bv_lshr(a, c)),
         "bvashr" => binary_bv(state, items, locals, |b, a, c| b.bv_ashr(a, c)),
-        "concat" => binary_bv(state, items, locals, |b, a, c| b.bv_concat(a, c)),
+        "concat" => concat_bv(state, items, locals),
         "bvult" => bv_cmp(state, items, locals, |b, a, c| b.bv_ult(a, c)),
         "bvule" => bv_cmp(state, items, locals, |b, a, c| b.bv_ule(a, c)),
         "bvugt" => bv_cmp(state, items, locals, |b, a, c| b.bv_ugt(a, c)),
@@ -439,18 +439,29 @@ fn parse_ite(
 }
 
 fn parse_indexed_literal(state: &mut ScriptState, items: &[SExpr]) -> Result<Binding> {
-    if items.len() == 4 && atom(&items[1])? == "bv" {
+    let (value, width) = if items.len() == 3 {
+        let bv_atom = atom(&items[1])?;
+        let value = bv_atom
+            .strip_prefix("bv")
+            .ok_or_else(|| Error::invalid("indexed literal", "expected (_ bvN W)"))?;
+        let width = atom(&items[2])?
+            .parse::<u32>()
+            .map_err(|_| Error::invalid("bv literal", "invalid width"))?;
+        (value, width)
+    } else if items.len() == 4 && atom(&items[1])? == "bv" {
         let value = atom(&items[2])?;
         let width = atom(&items[3])?
             .parse::<u32>()
             .map_err(|_| Error::invalid("bv literal", "invalid width"))?;
-        let bytes = decimal_to_le_bytes(value, (width as usize).div_ceil(8))?;
-        return Ok(Binding {
-            node: state.builder.bv_const_bytes(&bytes, width)?,
-            sort: SmtSort::Bv(width),
-        });
-    }
-    Err(Error::invalid("indexed literal", "expected (_ bvN W)"))
+        (value, width)
+    } else {
+        return Err(Error::invalid("indexed literal", "expected (_ bvN W)"));
+    };
+    let bytes = decimal_to_le_bytes(value, (width as usize).div_ceil(8))?;
+    Ok(Binding {
+        node: state.builder.bv_const_bytes(&bytes, width)?,
+        sort: SmtSort::Bv(width),
+    })
 }
 
 fn parse_indexed_op(
@@ -667,6 +678,23 @@ fn binary_bv(
     Ok(Binding {
         node: f(&mut state.builder, a.node, b.node)?,
         sort: SmtSort::Bv(w1),
+    })
+}
+
+fn concat_bv(
+    state: &mut ScriptState,
+    items: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+) -> Result<Binding> {
+    expect_len(items, 3, "concat")?;
+    let a = parse_expr_with_locals(state, &items[1], locals)?;
+    let b = parse_expr_with_locals(state, &items[2], locals)?;
+    let (SmtSort::Bv(w1), SmtSort::Bv(w2)) = (a.sort, b.sort) else {
+        return Err(Error::invalid("concat", "argument is not BV"));
+    };
+    Ok(Binding {
+        node: state.builder.bv_concat(a.node, b.node)?,
+        sort: SmtSort::Bv(w1 + w2),
     })
 }
 

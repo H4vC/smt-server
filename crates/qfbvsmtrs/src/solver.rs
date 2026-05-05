@@ -2,12 +2,12 @@ use std::time::Instant;
 
 use crate::blast::blast_query;
 use crate::cnf;
-use crate::config::{Config, SatBackendKind};
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::ir::{NodeKind, Sort};
 use crate::model::{build_model, Model, ScalarValue};
 use crate::query::{Assertion, Command, Query};
-use crate::sat::{DpllSolver, SatResult};
+use crate::sat::{solve_cnf, SatResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolveStatus {
@@ -117,22 +117,24 @@ impl Solver {
         let deadline = self.config.budget.map(|budget| Instant::now() + budget);
         let blasted = blast_query(query)?;
         let cnf = cnf::encode(&blasted.gates, blasted.assertion);
-        match self.config.sat_backend {
-            SatBackendKind::Dpll => {
-                let sat = DpllSolver::new(cnf.num_vars, cnf.clauses, deadline).solve(&[]);
-                match sat {
-                    SatResult::Sat(assignment) => {
-                        let model = if want_model {
-                            Some(build_model(&blasted.variables, &assignment)?)
-                        } else {
-                            None
-                        };
-                        Ok(SolveResult::sat(model))
-                    }
-                    SatResult::Unsat => Ok(SolveResult::unsat()),
-                    SatResult::Unknown(message) => Ok(SolveResult::unknown(message)),
-                }
+        let sat = solve_cnf(
+            self.config.sat_backend,
+            cnf.num_vars,
+            cnf.clauses,
+            &[],
+            deadline,
+        );
+        match sat {
+            SatResult::Sat(assignment) => {
+                let model = if want_model {
+                    Some(build_model(&blasted.variables, &assignment)?)
+                } else {
+                    None
+                };
+                Ok(SolveResult::sat(model))
             }
+            SatResult::Unsat => Ok(SolveResult::unsat()),
+            SatResult::Unknown(message) => Ok(SolveResult::unknown(message)),
         }
     }
 

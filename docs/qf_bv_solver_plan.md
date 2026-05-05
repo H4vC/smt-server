@@ -50,7 +50,8 @@ The `qfbvsmtrs` crate should not depend on `smt-server`. It may optionally depen
 | Crate | Role | Why this one |
 |---|---|---|
 | `yaspar` | SMT-LIB 2.7 parsing | Callback-based, no AST allocation unless you want it, SMT-LIB 2.7 compliant |
-| `varisat` *or* `rustsat` + `rustsat-batsat` | SAT backend | Pure Rust, cross-platform, no C/C++ toolchain required |
+| `splr` | Default SAT backend | Pure-Rust CDCL solver with watched literals, restarts, and timeout support |
+| `varisat` | Alternate SAT backend | Pure-Rust CDCL solver used for backend cross-checking and comparison |
 | `rustsat` (encodings) | Cardinality / PB encodings | Optional, useful if you need pseudo-Boolean constraints later |
 | `smt-wire` (optional feature) | Server wire bridge | Lets `smt-server` feed validated binary requests into the standalone crate without depending on `smt-server` |
 
@@ -289,7 +290,7 @@ Initial feature policy should be conservative:
 
 | Request feature | V1 behavior |
 |---|---|
-| `Command::Solve` | supported once bit-blaster + SAT are ready |
+| `Command::Solve` | supported via bit-blaster + CNF + selectable SAT backend (`splr`, `varisat`, or internal DPLL) |
 | `Command::Simplify` | identity `SimplifyBlock` passthrough |
 | `Command::Minimize` / `Maximize` | supported with bit-hunt optimization over SAT queries |
 | `WANT_MODEL` | supported for SAT by reading primary-input assignments |
@@ -695,11 +696,11 @@ Maintain a directory of `.smt2` files with known `sat` / `unsat` answers and (fo
 | Layer | Scope | Method | When to Run |
 |---|---|---|---|
 | 1. Circuit unit | Individual adder, mul, etc. | Exhaustive 4-bit, exhaustive 8-bit | Every commit |
-| 2. Randomized circuit | Wider widths (16/32/64) | proptest, 10k samples | Every commit |
-| 3. Tseitin encoding | Gate graph → CNF | Truth table enumeration | Every commit |
-| 4. Differential vs Z3 | Whole solver | Compare sat/unsat/model with Z3 | CI (when Z3 available) |
-| 5. Fuzzing | Random QF_BV formulas | Grammar-based generation | Nightly / weekly |
-| 6. Known-answer | Regression suite | Fixed .smt2 files | Every commit |
+| 2. Randomized circuit | Wider widths (16/32/64) | deterministic randomized identity/property tests; 10k samples with `QFBVSMTRS_RANDOM_CIRCUIT_SAMPLES=10000` | Smoke every commit, 10k in scheduled CI |
+| 3. Tseitin encoding | Gate graph → CNF | Truth table enumeration across `splr`, `varisat`, and DPLL | Every commit |
+| 4. Differential vs Z3 | Whole solver | `cargo test -p qfbvsmtrs --test differential_z3`; extended random with `QFBVSMTRS_DIFF_RANDOM=1`; optional `QFBVSMTRS_SMTLIB_DIR` corpus | Smoke every commit, extended/corpus in scheduled CI |
+| 5. Fuzzing | Parser → IR → bit-blast → solve pipeline | `cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml` | Nightly / weekly |
+| 6. Known-answer | Regression suite | Fixed `.smt2` fixtures under `crates/qfbvsmtrs/tests/fixtures/known` plus inline edge cases | Every commit |
 
 
 ## 6. Performance Considerations

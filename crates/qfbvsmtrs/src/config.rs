@@ -2,6 +2,8 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SatBackendKind {
+    Splr,
+    Varisat,
     Dpll,
 }
 
@@ -14,7 +16,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sat_backend: SatBackendKind::Dpll,
+            sat_backend: SatBackendKind::Splr,
             budget: None,
         }
     }
@@ -23,6 +25,11 @@ impl Default for Config {
 impl Config {
     pub fn with_budget(mut self, budget: Option<Duration>) -> Self {
         self.budget = budget;
+        self
+    }
+
+    pub fn with_sat_backend(mut self, sat_backend: SatBackendKind) -> Self {
+        self.sat_backend = sat_backend;
         self
     }
 }

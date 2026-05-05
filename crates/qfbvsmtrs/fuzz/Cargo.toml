@@ -1,0 +1,21 @@
+[package]
+name = "qfbvsmtrs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qfbvsmtrs = { path = ".." }
+
+[[bin]]
+name = "smt2_pipeline"
+path = "fuzz_targets/smt2_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

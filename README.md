@@ -120,15 +120,32 @@ On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link
 cargo run -p qfbvsmtrs -- path/to/query.smt2
 ```
 
-If no path is supplied, `qfbvsmtrs` reads SMT-LIB from stdin.
+If no path is supplied, `qfbvsmtrs` reads SMT-LIB from stdin. The default SAT backend is `splr` (CDCL); `varisat` and the internal DPLL solver remain selectable through `Config::with_sat_backend`.
+
+A lightweight benchmark runner is available for baseline timings:
+
+```sh
+cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
+```
 
 ## Test
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 python clients/tests/test_python_client.py
 python clients/tests/test_live_server.py   # also exercises the live C++ TCP client when a compiler is available
+```
+
+Optional production-validation gates for `qfbvsmtrs`:
+
+```sh
+cargo test -p qfbvsmtrs --test differential_z3
+QFBVSMTRS_RANDOM_CIRCUIT_SAMPLES=10000 cargo test -p qfbvsmtrs --test random_circuits
+QFBVSMTRS_DIFF_RANDOM=1 cargo test -p qfbvsmtrs --test differential_z3
+QFBVSMTRS_SMTLIB_DIR=/path/to/SMT-LIB/QF_BV cargo test -p qfbvsmtrs --test differential_z3
+cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 ```
 
 A standalone C++ smoke test is also available:
@@ -146,4 +163,5 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 - `clients/python` — Python single-file client helper
 - `clients/cpp` — C++17 single-header client helper
 - `docs/smt-wire-format-plan.md` — detailed binary wire-format plan
+- `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates
 - `docs` — backend notes and evaluation details
