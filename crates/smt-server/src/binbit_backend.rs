@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use binbit::{BoolTerm, BvTerm, SmtResult, SmtSolver};
 use smt_wire::{
@@ -6,7 +6,7 @@ use smt_wire::{
     OptimizationValueBlock, ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
 
-use crate::backend::{Backend, QueryResult};
+use crate::backend::{Backend, QueryResult, SolveContext};
 
 #[derive(Debug, Clone, Default)]
 pub struct BinbitBackend;
@@ -26,6 +26,25 @@ impl Backend for BinbitBackend {
             })),
             Command::Solve => solve(request),
             Command::Minimize | Command::Maximize => optimize(request),
+        }
+    }
+
+    fn handle_with_context(
+        &self,
+        request: &BinaryRequest,
+        context: &SolveContext,
+    ) -> smt_wire::Result<QueryResult> {
+        if context.is_cancelled() {
+            return Ok(QueryResult::unknown(
+                "binbit request cancelled before start",
+            ));
+        }
+        match request.envelope.command {
+            Command::Simplify => self.handle(request),
+            Command::Solve => solve_with_context(request, context),
+            Command::Minimize | Command::Maximize => Ok(QueryResult::unknown(
+                "binbit optimization does not support cooperative cancellation",
+            )),
         }
     }
 }
@@ -73,6 +92,13 @@ impl BinbitTranslation {
 }
 
 fn translate(request: &BinaryRequest) -> smt_wire::Result<BinbitTranslation> {
+    translate_with_context(request, None)
+}
+
+fn translate_with_context(
+    request: &BinaryRequest,
+    context: Option<&SolveContext>,
+) -> smt_wire::Result<BinbitTranslation> {
     let expr = request.expression_view()?;
     let mut out = BinbitTranslation {
         solver: SmtSolver::new(),
@@ -82,6 +108,12 @@ fn translate(request: &BinaryRequest) -> smt_wire::Result<BinbitTranslation> {
     };
 
     for index in 0..expr.node_count() {
+        if index % 1024 == 0 && context.is_some_and(SolveContext::is_cancelled) {
+            return Err(WireError::invalid(
+                "binbit translation",
+                "request cancelled",
+            ));
+        }
         let node = expr.node(index)?;
         match node.tag {
             tag::BV_VAR => {
@@ -296,12 +328,35 @@ fn translate(request: &BinaryRequest) -> smt_wire::Result<BinbitTranslation> {
 }
 
 fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+    solve_inner(request, None)
+}
+
+fn solve_with_context(
+    request: &BinaryRequest,
+    context: &SolveContext,
+) -> smt_wire::Result<QueryResult> {
+    solve_inner(request, Some(context))
+}
+
+fn solve_inner(
+    request: &BinaryRequest,
+    context: Option<&SolveContext>,
+) -> smt_wire::Result<QueryResult> {
     let expr = request.expression_view()?;
-    let mut translation = translate(request)?;
+    let mut translation = match translate_with_context(request, context) {
+        Ok(translation) => translation,
+        Err(_) if context.is_some_and(SolveContext::is_cancelled) => {
+            return Ok(QueryResult::unknown("binbit request cancelled"));
+        }
+        Err(err) => return Err(err),
+    };
     let want_model = (request.envelope.flags & request_flags::WANT_MODEL) != 0;
     let want_core = (request.envelope.flags & request_flags::WANT_CORE) != 0;
 
     for (index, root) in request.assertion_roots.iter().enumerate() {
+        if context.is_some_and(SolveContext::is_cancelled) {
+            return Ok(QueryResult::unknown("binbit request cancelled"));
+        }
         let assertion = translation.bool(*root)?;
         if want_core && index < request.named_assertion_refs.len() {
             let name = expr.blob_str(request.named_assertion_refs[index], "named assertion")?;
@@ -316,14 +371,12 @@ fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         .map(|root| translation.bool(*root))
         .collect::<smt_wire::Result<Vec<_>>>()?;
 
-    let result = if request.envelope.budget_ms == 0 {
-        Some(translation.solver.solve_under_assumptions(&assumptions))
-    } else {
-        translation.solver.solve_under_assumptions_timed(
-            &assumptions,
-            Duration::from_millis(u64::from(request.envelope.budget_ms)),
-        )
-    };
+    let result = solve_binbit(
+        &mut translation.solver,
+        &assumptions,
+        request.envelope.budget_ms,
+        context,
+    );
 
     match result {
         Some(SmtResult::Sat) => {
@@ -349,7 +402,49 @@ fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
             };
             Ok(QueryResult::unsat(core))
         }
+        None if context.is_some_and(SolveContext::is_cancelled) => {
+            Ok(QueryResult::unknown("binbit request cancelled"))
+        }
         None => Ok(QueryResult::unknown("binbit budget exhausted")),
+    }
+}
+
+fn solve_binbit(
+    solver: &mut SmtSolver,
+    assumptions: &[BoolTerm],
+    budget_ms: u32,
+    context: Option<&SolveContext>,
+) -> Option<SmtResult> {
+    let Some(context) = context else {
+        return if budget_ms == 0 {
+            Some(solver.solve_under_assumptions(assumptions))
+        } else {
+            solver.solve_under_assumptions_timed(
+                assumptions,
+                Duration::from_millis(u64::from(budget_ms)),
+            )
+        };
+    };
+
+    let deadline =
+        (budget_ms != 0).then(|| Instant::now() + Duration::from_millis(u64::from(budget_ms)));
+    loop {
+        if context.is_cancelled() {
+            return None;
+        }
+        let slice = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.checked_duration_since(Instant::now())?;
+                if remaining.is_zero() {
+                    return None;
+                }
+                remaining.min(Duration::from_millis(10))
+            }
+            None => Duration::from_millis(10),
+        };
+        if let Some(result) = solver.solve_under_assumptions_timed(assumptions, slice) {
+            return Some(result);
+        }
     }
 }
 

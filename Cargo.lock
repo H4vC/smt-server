@@ -1380,11 +1380,10 @@ dependencies = [
 name = "qfbvsmtrs"
 version = "0.1.0"
 dependencies = [
- "dashu",
+ "smt-qfbv-smtlib",
  "smt-wire",
  "splr",
  "varisat",
- "yaspar",
  "z3",
 ]
 
@@ -1783,14 +1782,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smt-qfbv-smtlib"
+version = "0.1.0"
+dependencies = [
+ "dashu",
+ "yaspar",
+]
+
+[[package]]
 name = "smt-server"
 version = "0.1.0"
 dependencies = [
  "binbit",
- "dashu",
  "qfbvsmtrs",
+ "smt-qfbv-smtlib",
  "smt-wire",
- "yaspar",
  "z3",
 ]
 

@@ -17,6 +17,7 @@ VERSION = 1
 BOOL_BIT = 0x80000000
 INDEX_MASK = 0x7fffffff
 MAX_WIDTH = 65536
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 BV_VAR = 0
 BV_CONST = 1
@@ -509,9 +510,59 @@ def parse_response(data: bytes) -> Response:
     status = data[8]
     flags = data[9]
     payload_len, = struct.unpack_from("<I", data, 10)
+    reserved, = struct.unpack_from("<H", data, 14)
+    if reserved != 0:
+        raise ValueError("response reserved field is not zero")
     if len(data) != 16 + payload_len:
         raise ValueError("response length mismatch")
-    return Response(request_id, status, flags, data[16:])
+    payload = data[16:]
+    _validate_response_payload(status, flags, payload)
+    return Response(request_id, status, flags, payload)
+
+
+def _validate_response_payload(status: int, flags: int, payload: bytes) -> None:
+    all_flags = HAS_MODEL | HAS_CORE | HAS_EXPR | HAS_VALUE | HAS_MESSAGE
+    if flags & ~all_flags:
+        raise ValueError("unknown response flag bits")
+    if status == ERROR:
+        if flags != HAS_MESSAGE:
+            raise ValueError("ERROR status must use exactly HAS_MESSAGE")
+        payload.decode("utf-8")
+    elif status == UNKNOWN:
+        if flags == 0:
+            if payload:
+                raise ValueError("UNKNOWN payload requires HAS_MESSAGE")
+        elif flags == HAS_MESSAGE:
+            payload.decode("utf-8")
+        else:
+            raise ValueError("UNKNOWN status may only use HAS_MESSAGE")
+    elif status == SAT:
+        allowed = HAS_MODEL | HAS_VALUE
+        if flags & ~allowed:
+            raise ValueError("SAT status may only use HAS_MODEL/HAS_VALUE")
+        has_value = bool(flags & HAS_VALUE)
+        has_model = bool(flags & HAS_MODEL)
+        if not has_value and not has_model:
+            if payload:
+                raise ValueError("SAT payload without flags")
+        elif has_value:
+            parse_optimization(payload, has_model)
+        else:
+            parse_model(payload)
+    elif status == UNSAT:
+        if flags == 0:
+            if payload:
+                raise ValueError("UNSAT payload without HAS_CORE")
+        elif flags == HAS_CORE:
+            parse_core(payload)
+        else:
+            raise ValueError("UNSAT status may only use HAS_CORE")
+    elif status == OK:
+        if flags != HAS_EXPR:
+            raise ValueError("OK status must use exactly HAS_EXPR")
+        parse_simplify(payload)
+    else:
+        raise ValueError(f"unknown response status {status}")
 
 
 def _need(data: bytes, offset: int, length: int, context: str) -> None:
@@ -574,7 +625,9 @@ def parse_core(payload: bytes) -> list[str]:
 
 def parse_simplify(payload: bytes) -> SimplifyResult:
     _need(payload, 0, 12, "simplify header")
-    expr_len, assertion_count, named_count, assumption_count, _reserved = struct.unpack_from("<IHHHH", payload, 0)
+    expr_len, assertion_count, named_count, assumption_count, reserved = struct.unpack_from("<IHHHH", payload, 0)
+    if reserved != 0:
+        raise ValueError("simplify reserved field is not zero")
     if named_count > assertion_count:
         raise ValueError("named_count exceeds assertion_count")
     offset = 12
@@ -609,6 +662,8 @@ def parse_optimization(payload: bytes, has_model: bool = False) -> OptimizationR
 
 
 def frame(payload: bytes) -> bytes:
+    if len(payload) > 0xFFFFFFFF:
+        raise ValueError("frame payload too large")
     return struct.pack("<I", len(payload)) + payload
 
 
@@ -633,12 +688,26 @@ class TcpClient:
         port: int = 9123,
         timeout: Optional[float] = None,
         sock: Optional[socket.socket] = None,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
+        if max_response_bytes < 0:
+            raise ValueError("max_response_bytes must be non-negative")
+        self.max_response_bytes = max_response_bytes
         self._sock = sock if sock is not None else socket.create_connection((host, port), timeout=timeout)
+        if timeout is not None:
+            self._sock.settimeout(timeout)
 
     @classmethod
     def from_socket(cls, sock: socket.socket) -> "TcpClient":
         return cls(sock=sock)
+
+    def set_max_response_bytes(self, max_response_bytes: int) -> None:
+        if max_response_bytes < 0:
+            raise ValueError("max_response_bytes must be non-negative")
+        self.max_response_bytes = max_response_bytes
+
+    def set_timeout(self, timeout: Optional[float]) -> None:
+        self._sock.settimeout(timeout)
 
     def close(self) -> None:
         self._sock.close()
@@ -652,6 +721,10 @@ class TcpClient:
     def send_payload(self, payload: bytes) -> bytes:
         self._sock.sendall(frame(payload))
         (length,) = struct.unpack("<I", recv_exact(self._sock, 4))
+        if length > self.max_response_bytes:
+            raise ValueError(
+                f"response frame length {length} exceeds configured maximum {self.max_response_bytes}"
+            )
         return recv_exact(self._sock, length)
 
     def send_request(self, request: bytes) -> Response:

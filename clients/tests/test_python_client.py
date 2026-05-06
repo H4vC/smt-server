@@ -75,8 +75,54 @@ def test_python_response_parser():
     assert smt.parse_core(core_payload) == ["a0"]
 
 
+def test_python_response_parser_rejects_bad_status_flag_combinations():
+    bad_error = b"SMTR" + (1).to_bytes(4, "little") + bytes([smt.ERROR, 0]) + (0).to_bytes(4, "little") + b"\0\0"
+    try:
+        smt.parse_response(bad_error)
+        raise AssertionError("expected bad ERROR response to be rejected")
+    except ValueError:
+        pass
+
+    bad_sat = b"SMTR" + (1).to_bytes(4, "little") + bytes([smt.SAT, smt.HAS_CORE]) + (0).to_bytes(4, "little") + b"\0\0"
+    try:
+        smt.parse_response(bad_sat)
+        raise AssertionError("expected bad SAT flags to be rejected")
+    except ValueError:
+        pass
+
+
+def test_python_tcp_client_rejects_oversized_response_before_allocation():
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.sent = bytearray()
+            self.incoming = bytearray((1024).to_bytes(4, "little"))
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.extend(data)
+
+        def recv(self, length: int) -> bytes:
+            if not self.incoming:
+                return b""
+            out = self.incoming[:length]
+            del self.incoming[:length]
+            return bytes(out)
+
+        def close(self) -> None:
+            pass
+
+    client = smt.TcpClient.from_socket(FakeSocket())
+    client.set_max_response_bytes(8)
+    try:
+        client.send_payload(b"x")
+        raise AssertionError("expected oversized response frame to be rejected")
+    except ValueError:
+        pass
+
+
 if __name__ == "__main__":
     test_python_client_matches_simple_sat_golden_vector()
     test_python_client_validates_width_and_sort()
     test_python_wide_integer_constant_uses_blob_encoding_and_masks_to_width()
     test_python_response_parser()
+    test_python_response_parser_rejects_bad_status_flag_combinations()
+    test_python_tcp_client_rejects_oversized_response_before_allocation()

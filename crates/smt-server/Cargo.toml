@@ -7,8 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 binbit = { git = "https://github.com/bint-disasm/binbit", rev = "b4996145c06f39ce5bbc79a959975d7d20b6cf5e" }
-dashu = { version = "0.4.2", features = ["num-traits"] }
 qfbvsmtrs = { path = "../qfbvsmtrs", features = ["wire"] }
+smt-qfbv-smtlib = { path = "../smt-qfbv-smtlib" }
 smt-wire = { path = "../smt-wire" }
-yaspar = "2.7.0"
 z3 = { version = "0.20.0", features = ["gh-release"] }

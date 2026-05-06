@@ -4,7 +4,7 @@ use smt_wire::{
     BinaryRequest, Command, OptimizationValueBlock, ScalarValue, SimplifyBlock, UnsatCoreBlock,
 };
 
-use crate::backend::{Backend, QueryResult};
+use crate::backend::{Backend, QueryResult, SolveContext};
 
 #[derive(Debug, Clone, Default)]
 pub struct QfbvsmtrsBackend;
@@ -29,6 +29,24 @@ impl Backend for QfbvsmtrsBackend {
             Command::Solve | Command::Minimize | Command::Maximize => solve(request),
         }
     }
+
+    fn handle_with_context(
+        &self,
+        request: &BinaryRequest,
+        context: &SolveContext,
+    ) -> smt_wire::Result<QueryResult> {
+        if context.is_cancelled() {
+            return Ok(QueryResult::unknown(
+                "qfbvsmtrs request cancelled before start",
+            ));
+        }
+        match request.envelope.command {
+            Command::Simplify => self.handle(request),
+            Command::Solve | Command::Minimize | Command::Maximize => {
+                solve_with_context(request, context)
+            }
+        }
+    }
 }
 
 fn scalar_to_wire(value: &qfbvsmtrs::ScalarValue) -> smt_wire::Result<ScalarValue> {
@@ -40,18 +58,51 @@ fn scalar_to_wire(value: &qfbvsmtrs::ScalarValue) -> smt_wire::Result<ScalarValu
 
 fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
     let request = request.clone();
-    let worker = std::thread::Builder::new()
+    let worker = spawn_worker(request, None)?;
+    join_worker(worker)
+}
+
+fn solve_with_context(
+    request: &BinaryRequest,
+    context: &SolveContext,
+) -> smt_wire::Result<QueryResult> {
+    let cancellation = qfbvsmtrs::CancellationToken::new();
+    let worker = spawn_worker(request.clone(), Some(cancellation.clone()))?;
+    loop {
+        if worker.is_finished() {
+            return join_worker(worker);
+        }
+        if context.is_cancelled() {
+            cancellation.cancel();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn spawn_worker(
+    request: BinaryRequest,
+    cancellation: Option<qfbvsmtrs::CancellationToken>,
+) -> smt_wire::Result<std::thread::JoinHandle<smt_wire::Result<QueryResult>>> {
+    std::thread::Builder::new()
         .name("qfbvsmtrs-backend".to_owned())
         .stack_size(qfbvsmtrs::DEFAULT_WORKER_STACK_BYTES)
-        .spawn(move || solve_on_worker(&request))
-        .map_err(|err| smt_wire::WireError::invalid("qfbvsmtrs worker", err.to_string()))?;
+        .spawn(move || solve_on_worker(&request, cancellation))
+        .map_err(|err| smt_wire::WireError::invalid("qfbvsmtrs worker", err.to_string()))
+}
+
+fn join_worker(
+    worker: std::thread::JoinHandle<smt_wire::Result<QueryResult>>,
+) -> smt_wire::Result<QueryResult> {
     match worker.join() {
         Ok(result) => result,
         Err(_) => Ok(QueryResult::unknown("qfbvsmtrs worker panicked")),
     }
 }
 
-fn solve_on_worker(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+fn solve_on_worker(
+    request: &BinaryRequest,
+    cancellation: Option<qfbvsmtrs::CancellationToken>,
+) -> smt_wire::Result<QueryResult> {
     let query = match qfbvsmtrs::query_from_wire(request) {
         Ok(query) => query,
         Err(err) => return Ok(QueryResult::unknown(format!("qfbvsmtrs: {err}"))),
@@ -61,8 +112,11 @@ fn solve_on_worker(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
     } else {
         Some(Duration::from_millis(u64::from(request.envelope.budget_ms)))
     };
-    let mut config = qfbvsmtrs::Config::default().with_budget(budget);
-    if budget.is_some() {
+    let has_cancellation = cancellation.is_some();
+    let mut config = qfbvsmtrs::Config::default()
+        .with_budget(budget)
+        .with_cancellation_token(cancellation);
+    if budget.is_some() || has_cancellation {
         // SPLR's library timeout can be conservative under some workloads.
         // The server adapter uses the polling DPLL backend for budgeted
         // qfbvsmtrs requests so request deadlines are hard-bounded in-process.

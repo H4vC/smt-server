@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use crate::config::CancellationToken;
 use crate::error::{Error, Result};
 use crate::gates::{GateArena, GateId, GateKind};
 
@@ -39,11 +40,20 @@ pub fn encode_with_deadline(
     assertion: GateId,
     deadline: Option<Instant>,
 ) -> Result<Cnf> {
+    encode_with_limits(gates, assertion, deadline, None)
+}
+
+pub fn encode_with_limits(
+    gates: &GateArena,
+    assertion: GateId,
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Cnf> {
     let num_vars = gates.gates().len();
     let mut clauses = Vec::new();
     for (index, gate) in gates.gates().iter().enumerate() {
-        if index % 4096 == 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(Error::Timeout);
+        if index % 4096 == 0 {
+            check_limits(deadline, cancellation)?;
         }
         let g = (index + 1) as i32;
         match *gate {
@@ -91,6 +101,16 @@ pub fn encode_with_deadline(
     }
     push_clause(&mut clauses, vec![lit(assertion)]);
     Ok(Cnf { num_vars, clauses })
+}
+
+fn check_limits(deadline: Option<Instant>, cancellation: Option<&CancellationToken>) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(Error::Timeout);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(Error::Timeout);
+    }
+    Ok(())
 }
 
 fn push_clause(clauses: &mut Vec<Vec<i32>>, mut clause: Vec<i32>) {

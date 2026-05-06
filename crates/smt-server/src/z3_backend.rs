@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use smt_wire::{
@@ -6,10 +7,10 @@ use smt_wire::{
 };
 use z3::{
     ast::{Bool, BV},
-    Config, Model, Params, SatResult, Solver,
+    Config as Z3Config, Context, Model, Params, SatResult, Solver,
 };
 
-use crate::backend::{Backend, QueryResult};
+use crate::backend::{Backend, QueryResult, SolveContext};
 
 #[derive(Debug, Clone, Default)]
 pub struct Z3Backend;
@@ -20,27 +21,80 @@ impl Backend for Z3Backend {
     }
 
     fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
-        match request.envelope.command {
-            Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
-                expression: request.expression.clone(),
-                assertion_roots: request.assertion_roots.clone(),
-                named_assertion_refs: request.named_assertion_refs.clone(),
-                assumption_roots: request.assumption_roots.clone(),
-            })),
-            Command::Solve | Command::Minimize | Command::Maximize => {
-                let mut cfg = Config::new();
-                cfg.set_model_generation(true);
-                if request.envelope.budget_ms != 0 {
-                    cfg.set_timeout_msec(u64::from(request.envelope.budget_ms));
-                }
-                z3::with_z3_config(&cfg, || match request.envelope.command {
-                    Command::Solve => solve(request),
-                    Command::Minimize | Command::Maximize => optimize(request),
-                    Command::Simplify => unreachable!("handled above"),
-                })
+        handle_inner(request, None)
+    }
+
+    fn handle_with_context(
+        &self,
+        request: &BinaryRequest,
+        context: &SolveContext,
+    ) -> smt_wire::Result<QueryResult> {
+        if context.is_cancelled() {
+            return Ok(QueryResult::unknown("z3 request cancelled before start"));
+        }
+        handle_inner(request, Some(context))
+    }
+}
+
+fn handle_inner(
+    request: &BinaryRequest,
+    context: Option<&SolveContext>,
+) -> smt_wire::Result<QueryResult> {
+    match request.envelope.command {
+        Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
+            expression: request.expression.clone(),
+            assertion_roots: request.assertion_roots.clone(),
+            named_assertion_refs: request.named_assertion_refs.clone(),
+            assumption_roots: request.assumption_roots.clone(),
+        })),
+        Command::Solve | Command::Minimize | Command::Maximize => {
+            let mut cfg = Z3Config::new();
+            cfg.set_model_generation(true);
+            if request.envelope.budget_ms != 0 {
+                cfg.set_timeout_msec(u64::from(request.envelope.budget_ms));
             }
+            with_optional_z3_cancellation(&cfg, context, || match request.envelope.command {
+                Command::Solve => solve(request),
+                Command::Minimize | Command::Maximize => optimize(request),
+                Command::Simplify => unreachable!("handled above"),
+            })
         }
     }
+}
+
+fn with_optional_z3_cancellation<R>(
+    cfg: &Z3Config,
+    context: Option<&SolveContext>,
+    callback: impl FnOnce() -> R + Send + Sync,
+) -> R
+where
+    R: Send + Sync,
+{
+    let Some(context) = context else {
+        return z3::with_z3_config(cfg, callback);
+    };
+    z3::with_z3_config(cfg, || {
+        let z3_context = Context::thread_local();
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let handle = z3_context.handle();
+            let done_ref = &done;
+            let context_ref = context;
+            let watcher = scope.spawn(move || {
+                while !done_ref.load(Ordering::Acquire) {
+                    if context_ref.is_cancelled() {
+                        handle.interrupt();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+            let result = callback();
+            done.store(true, Ordering::Release);
+            let _ = watcher.join();
+            result
+        })
+    })
 }
 
 #[derive(Clone)]

@@ -28,9 +28,9 @@ pub mod solver;
 pub mod wire;
 
 pub use builder::Builder;
-pub use config::{Config, SatBackendKind, ShortcutMode};
+pub use config::{CancellationToken, Config, SatBackendKind, ShortcutMode};
 pub use error::{Error, Result};
-pub use frontend::{format_smt2_response, parse_smt2, solve_smt2};
+pub use frontend::{format_smt2_response, parse_smt2, solve_smt2, QfbvSmtLibSink};
 pub use ir::{Sort, TermId};
 pub use model::{Model, ModelEntry, ScalarValue};
 pub use query::{Assertion, Command, Query};

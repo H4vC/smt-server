@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::config::SatBackendKind;
+use crate::config::{CancellationToken, SatBackendKind};
 use crate::error::Error;
 use varisat::ExtendFormula;
 
@@ -18,6 +18,20 @@ pub fn solve_cnf(
     assumptions: &[i32],
     deadline: Option<Instant>,
 ) -> SatResult {
+    solve_cnf_with_cancellation(backend, num_vars, clauses, assumptions, deadline, None)
+}
+
+pub fn solve_cnf_with_cancellation(
+    backend: SatBackendKind,
+    num_vars: usize,
+    clauses: Vec<Vec<i32>>,
+    assumptions: &[i32],
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> SatResult {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return SatResult::Unknown("cancelled".to_owned());
+    }
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return SatResult::Unknown("budget exhausted".to_owned());
     }
@@ -25,7 +39,8 @@ pub fn solve_cnf(
         SatBackendKind::Splr => solve_with_splr(num_vars, &clauses, assumptions, deadline),
         SatBackendKind::Varisat => solve_with_varisat(num_vars, &clauses, assumptions, deadline),
         SatBackendKind::Dpll => {
-            DpllSolver::new(num_vars, clauses.clone(), deadline).solve(assumptions)
+            DpllSolver::new_with_cancellation(num_vars, clauses.clone(), deadline, cancellation)
+                .solve(assumptions)
         }
     };
     if let SatResult::Sat(assignment) = &result {
@@ -190,15 +205,25 @@ fn lit_is_satisfied(assignment: &[bool], lit: i32) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub struct DpllSolver {
+pub struct DpllSolver<'a> {
     num_vars: usize,
     clauses: Vec<Vec<i32>>,
     scores: Vec<usize>,
     deadline: Option<Instant>,
+    cancellation: Option<&'a CancellationToken>,
 }
 
-impl DpllSolver {
+impl<'a> DpllSolver<'a> {
     pub fn new(num_vars: usize, clauses: Vec<Vec<i32>>, deadline: Option<Instant>) -> Self {
+        Self::new_with_cancellation(num_vars, clauses, deadline, None)
+    }
+
+    pub fn new_with_cancellation(
+        num_vars: usize,
+        clauses: Vec<Vec<i32>>,
+        deadline: Option<Instant>,
+        cancellation: Option<&'a CancellationToken>,
+    ) -> Self {
         let mut scores = vec![0usize; num_vars + 1];
         for clause in &clauses {
             for &lit in clause {
@@ -210,6 +235,7 @@ impl DpllSolver {
             clauses,
             scores,
             deadline,
+            cancellation,
         }
     }
 
@@ -228,6 +254,13 @@ impl DpllSolver {
                 SatResult::Sat(values)
             }
             Ok(None) => SatResult::Unsat,
+            Err(Error::Timeout)
+                if self
+                    .cancellation
+                    .is_some_and(CancellationToken::is_cancelled) =>
+            {
+                SatResult::Unknown("cancelled".to_owned())
+            }
             Err(Error::Timeout) => SatResult::Unknown("budget exhausted".to_owned()),
             Err(err) => SatResult::Unknown(err.to_string()),
         }
@@ -314,6 +347,12 @@ impl DpllSolver {
     }
 
     fn check_deadline(&self) -> Result<(), Error> {
+        if self
+            .cancellation
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(Error::Timeout);
+        }
         if let Some(deadline) = self.deadline {
             if Instant::now() >= deadline {
                 return Err(Error::Timeout);
@@ -352,5 +391,20 @@ mod tests {
         assert!(!sat_assignment_satisfies(&clauses, &[-1], &[true, true]));
         assert!(!sat_assignment_satisfies(&clauses, &[1], &[false, true]));
         assert!(!sat_assignment_satisfies(&[vec![3]], &[], &[true, true]));
+    }
+
+    #[test]
+    fn dpll_observes_pre_cancelled_token() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = solve_cnf_with_cancellation(
+            SatBackendKind::Dpll,
+            1,
+            vec![vec![1]],
+            &[],
+            None,
+            Some(&cancellation),
+        );
+        assert_eq!(result, SatResult::Unknown("cancelled".to_owned()));
     }
 }

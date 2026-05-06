@@ -25,5 +25,5 @@ pub use qfbvsmtrs_backend::QfbvsmtrsBackend;
 pub use racing::RacingBackend;
 pub use server::{dispatch_payload, dispatch_payload_with_cache, serve_tcp, ServerConfig};
 pub use smt2::{request_to_smt2, Smt2Script, Smt2Variable};
-pub use smtlib::{handle_text_frame, parse_smtlib_script, TextQuery};
+pub use smtlib::{handle_text_frame, parse_smtlib_script, TextQuery, WireSmtLibSink};
 pub use z3_backend::Z3Backend;

@@ -148,6 +148,9 @@ pub(in crate::solver) fn try_solve(
     }
 
     for pass in UNSAT_PASSES {
+        if config.is_cancelled() {
+            return Ok(None);
+        }
         if (pass.run)(query)? {
             return Ok(Some(ShortcutHit {
                 pass_name: pass.name,
@@ -163,6 +166,9 @@ pub(in crate::solver) fn try_solve(
         validate_sat_witnesses: config.shortcut_mode == ShortcutMode::ValidateSatWitnesses,
     };
     for pass in SAT_PASSES {
+        if config.is_cancelled() {
+            return Ok(None);
+        }
         if (pass.run)(query, &context)? {
             return Ok(Some(ShortcutHit {
                 pass_name: pass.name,

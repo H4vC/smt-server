@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+use std::time::Duration;
 
 use smt_wire::{le, BinaryResponse, Status};
 
@@ -26,6 +27,8 @@ pub struct ServerConfig {
     pub max_frame_bytes: usize,
     pub max_response_bytes: usize,
     pub max_connections: usize,
+    pub read_timeout: Option<Duration>,
+    pub write_timeout: Option<Duration>,
 }
 
 impl ServerConfig {
@@ -36,6 +39,8 @@ impl ServerConfig {
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            read_timeout: None,
+            write_timeout: None,
         }
     }
 }
@@ -46,6 +51,7 @@ pub fn serve_tcp(addr: impl ToSocketAddrs, config: ServerConfig) -> std::io::Res
     let active_connections = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let mut stream = stream?;
+        apply_stream_timeouts(&stream, &config)?;
         if !try_acquire_connection(&active_connections, config.max_connections) {
             let _ = write_error_frame(&mut stream, "maximum active connections reached");
             continue;
@@ -58,6 +64,11 @@ pub fn serve_tcp(addr: impl ToSocketAddrs, config: ServerConfig) -> std::io::Res
         });
     }
     Ok(())
+}
+
+fn apply_stream_timeouts(stream: &TcpStream, config: &ServerConfig) -> std::io::Result<()> {
+    stream.set_read_timeout(config.read_timeout)?;
+    stream.set_write_timeout(config.write_timeout)
 }
 
 fn try_acquire_connection(active_connections: &AtomicUsize, max_connections: usize) -> bool {

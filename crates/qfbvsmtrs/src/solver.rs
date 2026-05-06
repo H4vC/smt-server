@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use crate::blast::blast_query_with_deadline;
+use crate::blast::blast_query_with_limits;
 use crate::cnf;
-use crate::config::{Config, ShortcutMode};
+use crate::config::{CancellationToken, Config, ShortcutMode};
 use crate::error::{Error, Result};
 use crate::ir::{NodeKind, Sort};
 use crate::model::{build_model, Model, ScalarValue};
 use crate::query::{Assertion, Command, Query};
-use crate::sat::{solve_cnf, SatResult};
+use crate::sat::{solve_cnf_with_cancellation, SatResult};
 
 mod shortcuts;
 
@@ -94,14 +94,33 @@ impl Solver {
         &self.config
     }
 
+    fn cancellation_token(&self) -> Option<&CancellationToken> {
+        self.config.cancellation_token.as_ref()
+    }
+
+    fn limit_unknown(&self) -> SolveResult {
+        if self.config.is_cancelled() {
+            SolveResult::unknown("cancelled")
+        } else {
+            SolveResult::unknown("budget exhausted")
+        }
+    }
+
     pub fn solve(&mut self, query: &Query) -> Result<SolveResult> {
         let deadline = self.config.budget.map(|budget| Instant::now() + budget);
+        if self.config.is_cancelled() {
+            return Ok(SolveResult::unknown("cancelled"));
+        }
         if matches!(query.command, Command::Minimize | Command::Maximize) {
             return self.optimize(query, deadline);
         }
         let mut result = self.solve_once_with_deadline(query, query.want_model, deadline)?;
         if result.status == SolveStatus::Unsat && query.want_core {
-            result.core = Some(self.extract_named_core(query, deadline)?);
+            result.core = match self.extract_named_core(query, deadline) {
+                Ok(core) => Some(core),
+                Err(Error::Timeout) => return Ok(self.limit_unknown()),
+                Err(err) => return Err(err),
+            };
         }
         Ok(result)
     }
@@ -119,6 +138,9 @@ impl Solver {
         want_model: bool,
         deadline: Option<Instant>,
     ) -> Result<SolveResult> {
+        if self.config.is_cancelled() {
+            return Ok(SolveResult::unknown("cancelled"));
+        }
         match query.command {
             Command::Simplify => return Ok(SolveResult::ok()),
             Command::Minimize | Command::Maximize => {
@@ -132,6 +154,9 @@ impl Solver {
             return Ok(SolveResult::unknown("budget exhausted"));
         }
         if let Some(hit) = shortcuts::try_solve(query, want_model, &self.config)? {
+            if self.config.is_cancelled() {
+                return Ok(SolveResult::unknown("cancelled"));
+            }
             if self.config.shortcut_mode == ShortcutMode::Audit {
                 let core = self.solve_core_once_with_deadline(query, want_model, deadline)?;
                 if core.status != SolveStatus::Unknown && core.status != hit.result.status {
@@ -152,26 +177,36 @@ impl Solver {
         want_model: bool,
         deadline: Option<Instant>,
     ) -> Result<SolveResult> {
+        if self.config.is_cancelled() {
+            return Ok(SolveResult::unknown("cancelled"));
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(SolveResult::unknown("budget exhausted"));
         }
 
-        let blasted = match blast_query_with_deadline(query, deadline) {
+        let cancellation = self.cancellation_token();
+        let blasted = match blast_query_with_limits(query, deadline, cancellation) {
             Ok(blasted) => blasted,
-            Err(Error::Timeout) => return Ok(SolveResult::unknown("budget exhausted")),
+            Err(Error::Timeout) => return Ok(self.limit_unknown()),
             Err(err) => return Err(err),
         };
-        let cnf = match cnf::encode_with_deadline(&blasted.gates, blasted.assertion, deadline) {
+        let cnf = match cnf::encode_with_limits(
+            &blasted.gates,
+            blasted.assertion,
+            deadline,
+            cancellation,
+        ) {
             Ok(cnf) => cnf,
-            Err(Error::Timeout) => return Ok(SolveResult::unknown("budget exhausted")),
+            Err(Error::Timeout) => return Ok(self.limit_unknown()),
             Err(err) => return Err(err),
         };
-        let sat = solve_cnf(
+        let sat = solve_cnf_with_cancellation(
             self.config.sat_backend,
             cnf.num_vars,
             cnf.clauses,
             &[],
             deadline,
+            cancellation,
         );
         match sat {
             SatResult::Sat(assignment) => {
@@ -288,6 +323,11 @@ impl Solver {
             .collect::<Vec<_>>();
         let mut pos = 0;
         while pos < active.len() {
+            if self.config.is_cancelled()
+                || deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                return Err(Error::Timeout);
+            }
             let candidate = active[pos];
             let trial_active = active
                 .iter()
@@ -394,6 +434,22 @@ mod tests {
         let mut solver = Solver::new(Config::default());
         let result = solver.solve(&query)?;
         assert_eq!(result.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn solver_observes_pre_cancelled_token() -> Result<()> {
+        let mut builder = Builder::new();
+        let t = builder.bool_true()?;
+        builder.assert(t)?;
+        let query = builder.finish()?;
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut solver = Solver::new(Config::default().with_cancellation_token(Some(cancellation)));
+        let result = solver.solve(&query)?;
+        assert_eq!(result.status, SolveStatus::Unknown);
+        assert_eq!(result.message.as_deref(), Some("cancelled"));
         Ok(())
     }
 

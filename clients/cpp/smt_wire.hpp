@@ -26,6 +26,7 @@
 #include <cstring>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -38,6 +39,7 @@ namespace smt_wire {
 constexpr uint32_t BOOL_BIT = 0x80000000u;
 constexpr uint32_t INDEX_MASK = 0x7fffffffu;
 constexpr uint32_t MAX_WIDTH = 65536u;
+constexpr size_t DEFAULT_MAX_RESPONSE_BYTES = 64u * 1024u * 1024u;
 
 namespace tag {
 constexpr uint8_t BV_VAR = 0, BV_CONST = 1, BV_NOT = 2, BV_NEG = 3, BV_AND = 4, BV_OR = 5;
@@ -52,7 +54,7 @@ constexpr uint8_t UADD_OVF = 36, SADD_OVF = 37, USUB_OVF = 38, SSUB_OVF = 39, UM
 namespace command { constexpr uint8_t SOLVE = 0, SIMPLIFY = 1, MINIMIZE = 2, MAXIMIZE = 3; }
 namespace request_flags { constexpr uint8_t WANT_MODEL = 1u << 0, WANT_CORE = 1u << 1, SIGNED = 1u << 2; }
 namespace status { constexpr uint8_t OK = 0, SAT = 1, UNSAT = 2, UNKNOWN = 3, ERROR = 4; }
-namespace response_flags { constexpr uint8_t HAS_MODEL = 1u << 0, HAS_CORE = 1u << 1, HAS_EXPR = 1u << 2, HAS_VALUE = 1u << 3, HAS_MESSAGE = 1u << 4; }
+namespace response_flags { constexpr uint8_t HAS_MODEL = 1u << 0, HAS_CORE = 1u << 1, HAS_EXPR = 1u << 2, HAS_VALUE = 1u << 3, HAS_MESSAGE = 1u << 4, ALL = HAS_MODEL | HAS_CORE | HAS_EXPR | HAS_VALUE | HAS_MESSAGE; }
 
 inline uint32_t bv_ref(uint32_t index) { if (index > INDEX_MASK) throw std::invalid_argument("node index out of range"); return index; }
 inline uint32_t bool_ref(uint32_t index) { if (index > INDEX_MASK) throw std::invalid_argument("node index out of range"); return BOOL_BIT | index; }
@@ -207,9 +209,45 @@ inline void require_bytes(const std::vector<uint8_t>& data, size_t off, size_t l
 inline ScalarValue parse_scalar_value(const std::vector<uint8_t>& data, size_t& off) { require_bytes(data, off, 8, "short scalar"); uint32_t width = read_u32(data, off); uint32_t len = read_u32(data, off + 4); off += 8; require_bytes(data, off, len, "short scalar value"); ScalarValue value{width, std::vector<uint8_t>(data.begin() + off, data.begin() + off + len)}; off += len; if (width == 0) { if (len != 1 || (value.bytes[0] != 0 && value.bytes[0] != 1)) throw std::invalid_argument("bad Bool scalar"); } else { uint32_t expected = bytes_for_width(width); if (len != expected) throw std::invalid_argument("bad BV scalar length"); uint32_t valid = width % 8; if (valid != 0 && !value.bytes.empty() && (value.bytes.back() & ~uint8_t((1u << valid) - 1u)) != 0) throw std::invalid_argument("bad BV scalar high bits"); } return value; }
 inline std::vector<ModelEntry> parse_model_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 4, "short model"); uint32_t count = read_u32(payload, 0); size_t off = 4; std::vector<ModelEntry> entries; entries.reserve(count); for (uint32_t i = 0; i < count; ++i) { require_bytes(payload, off, 4, "short model entry"); uint32_t ref = read_u32(payload, off); off += 4; entries.push_back({ref, parse_scalar_value(payload, off)}); } if (off != payload.size()) throw std::invalid_argument("trailing model bytes"); return entries; }
 inline std::vector<std::string> parse_core_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 4, "short core"); uint32_t count = read_u32(payload, 0); size_t off = 4; std::vector<std::string> names; names.reserve(count); for (uint32_t i = 0; i < count; ++i) { require_bytes(payload, off, 4, "short core name length"); uint32_t len = read_u32(payload, off); off += 4; require_bytes(payload, off, len, "short core name"); names.emplace_back(payload.begin() + off, payload.begin() + off + len); off += len; } if (off != payload.size()) throw std::invalid_argument("trailing core bytes"); return names; }
-inline SimplifyResult parse_simplify_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 12, "short simplify"); uint32_t expr_len = read_u32(payload, 0); uint16_t assertion_count = read_u16(payload, 4); uint16_t named_count = read_u16(payload, 6); uint16_t assumption_count = read_u16(payload, 8); if (named_count > assertion_count) throw std::invalid_argument("bad simplify named_count"); size_t off = 12; require_bytes(payload, off, expr_len, "short simplify expression"); SimplifyResult result; result.expression.assign(payload.begin() + off, payload.begin() + off + expr_len); off += expr_len; for (uint16_t i = 0; i < assertion_count; ++i) { result.assertion_roots.push_back(read_u32(payload, off)); off += 4; } for (uint16_t i = 0; i < named_count; ++i) { uint32_t name_off = read_u32(payload, off); uint32_t name_len = read_u32(payload, off + 4); off += 8; result.named_assertion_refs.push_back({name_off, name_len}); } for (uint16_t i = 0; i < assumption_count; ++i) { result.assumption_roots.push_back(read_u32(payload, off)); off += 4; } if (off != payload.size()) throw std::invalid_argument("trailing simplify bytes"); return result; }
+inline SimplifyResult parse_simplify_payload(const std::vector<uint8_t>& payload) { require_bytes(payload, 0, 12, "short simplify"); uint32_t expr_len = read_u32(payload, 0); uint16_t assertion_count = read_u16(payload, 4); uint16_t named_count = read_u16(payload, 6); uint16_t assumption_count = read_u16(payload, 8); if (read_u16(payload, 10) != 0) throw std::invalid_argument("bad simplify reserved"); if (named_count > assertion_count) throw std::invalid_argument("bad simplify named_count"); size_t off = 12; require_bytes(payload, off, expr_len, "short simplify expression"); SimplifyResult result; result.expression.assign(payload.begin() + off, payload.begin() + off + expr_len); off += expr_len; for (uint16_t i = 0; i < assertion_count; ++i) { result.assertion_roots.push_back(read_u32(payload, off)); off += 4; } for (uint16_t i = 0; i < named_count; ++i) { uint32_t name_off = read_u32(payload, off); uint32_t name_len = read_u32(payload, off + 4); off += 8; result.named_assertion_refs.push_back({name_off, name_len}); } for (uint16_t i = 0; i < assumption_count; ++i) { result.assumption_roots.push_back(read_u32(payload, off)); off += 4; } if (off != payload.size()) throw std::invalid_argument("trailing simplify bytes"); return result; }
 inline OptimizationResult parse_optimization_payload(const std::vector<uint8_t>& payload, bool has_model) { size_t off = 0; OptimizationResult result{parse_scalar_value(payload, off), has_model, {}}; if (has_model) { std::vector<uint8_t> rest(payload.begin() + off, payload.end()); result.model = parse_model_payload(rest); off = payload.size(); } if (off != payload.size()) throw std::invalid_argument("trailing optimization bytes"); return result; }
-inline Response parse_response(const std::vector<uint8_t>& data) { if (data.size() < 16 || data[0] != 'S' || data[1] != 'M' || data[2] != 'T' || data[3] != 'R') throw std::invalid_argument("bad response"); uint32_t len = read_u32(data, 10); if (data.size() != 16u + len) throw std::invalid_argument("response length mismatch"); return {read_u32(data, 4), data[8], data[9], std::vector<uint8_t>(data.begin() + 16, data.end())}; }
+inline void validate_response_payload(uint8_t st, uint8_t flags, const std::vector<uint8_t>& payload) {
+    if ((flags & ~response_flags::ALL) != 0) throw std::invalid_argument("unknown response flags");
+    if (st == status::ERROR) {
+        if (flags != response_flags::HAS_MESSAGE) throw std::invalid_argument("bad ERROR flags");
+        (void)std::string(payload.begin(), payload.end());
+    } else if (st == status::UNKNOWN) {
+        if (flags == 0) { if (!payload.empty()) throw std::invalid_argument("UNKNOWN payload without HAS_MESSAGE"); }
+        else if (flags == response_flags::HAS_MESSAGE) { (void)std::string(payload.begin(), payload.end()); }
+        else throw std::invalid_argument("bad UNKNOWN flags");
+    } else if (st == status::SAT) {
+        uint8_t allowed = response_flags::HAS_MODEL | response_flags::HAS_VALUE;
+        if ((flags & ~allowed) != 0) throw std::invalid_argument("bad SAT flags");
+        bool has_value = (flags & response_flags::HAS_VALUE) != 0;
+        bool has_model = (flags & response_flags::HAS_MODEL) != 0;
+        if (!has_value && !has_model) { if (!payload.empty()) throw std::invalid_argument("SAT payload without flags"); }
+        else if (has_value) { (void)parse_optimization_payload(payload, has_model); }
+        else { (void)parse_model_payload(payload); }
+    } else if (st == status::UNSAT) {
+        if (flags == 0) { if (!payload.empty()) throw std::invalid_argument("UNSAT payload without HAS_CORE"); }
+        else if (flags == response_flags::HAS_CORE) { (void)parse_core_payload(payload); }
+        else throw std::invalid_argument("bad UNSAT flags");
+    } else if (st == status::OK) {
+        if (flags != response_flags::HAS_EXPR) throw std::invalid_argument("bad OK flags");
+        (void)parse_simplify_payload(payload);
+    } else {
+        throw std::invalid_argument("unknown response status");
+    }
+}
+inline Response parse_response(const std::vector<uint8_t>& data) {
+    if (data.size() < 16 || data[0] != 'S' || data[1] != 'M' || data[2] != 'T' || data[3] != 'R') throw std::invalid_argument("bad response");
+    uint32_t len = read_u32(data, 10);
+    if (read_u16(data, 14) != 0) throw std::invalid_argument("response reserved field is not zero");
+    if (data.size() != 16u + len) throw std::invalid_argument("response length mismatch");
+    Response response{read_u32(data, 4), data[8], data[9], std::vector<uint8_t>(data.begin() + 16, data.end())};
+    validate_response_payload(response.status, response.flags, response.payload);
+    return response;
+}
 
 namespace detail {
 #ifdef _WIN32
@@ -230,6 +268,16 @@ inline std::string socket_error_text(int code) { return std::strerror(code); }
 inline std::string gai_error_text(int code) { return gai_strerror(code); }
 #endif
 inline void throw_socket_error(const char* action) { throw std::runtime_error(std::string(action) + ": " + socket_error_text(last_socket_error())); }
+inline void set_socket_timeout_ms(socket_handle s, int opt, int milliseconds) {
+#ifdef _WIN32
+    DWORD timeout = milliseconds < 0 ? 0u : static_cast<DWORD>(milliseconds);
+    if (::setsockopt(s, SOL_SOCKET, opt, reinterpret_cast<const char*>(&timeout), sizeof(timeout)) != 0) throw_socket_error("setsockopt");
+#else
+    timeval tv{};
+    if (milliseconds >= 0) { tv.tv_sec = milliseconds / 1000; tv.tv_usec = (milliseconds % 1000) * 1000; }
+    if (::setsockopt(s, SOL_SOCKET, opt, &tv, sizeof(tv)) != 0) throw_socket_error("setsockopt");
+#endif
+}
 } // namespace detail
 
 class TcpClient {
@@ -244,6 +292,10 @@ public:
 
     static TcpClient connect(const std::string& host, uint16_t port) { return TcpClient(host, port); }
     bool connected() const { return sock_ != detail::invalid_socket; }
+    void set_max_response_bytes(size_t max_response_bytes) { max_response_bytes_ = max_response_bytes; }
+    size_t max_response_bytes() const { return max_response_bytes_; }
+    void set_read_timeout_ms(int milliseconds) { require_connected(); detail::set_socket_timeout_ms(sock_, SO_RCVTIMEO, milliseconds); }
+    void set_write_timeout_ms(int milliseconds) { require_connected(); detail::set_socket_timeout_ms(sock_, SO_SNDTIMEO, milliseconds); }
 
     void open(const std::string& host, uint16_t port) {
         close();
@@ -320,7 +372,9 @@ public:
         auto framed = frame(payload);
         send_all(framed.data(), framed.size());
         auto header = recv_exact(4);
-        return recv_exact(read_u32(header, 0));
+        uint32_t len = read_u32(header, 0);
+        if (len > max_response_bytes_) throw std::runtime_error("response frame exceeds configured maximum");
+        return recv_exact(len);
     }
 
     Response send_request(const std::vector<uint8_t>& request) { return parse_response(send_payload(request)); }
@@ -333,6 +387,7 @@ public:
 
 private:
     detail::socket_handle sock_ = detail::invalid_socket;
+    size_t max_response_bytes_ = DEFAULT_MAX_RESPONSE_BYTES;
     void require_connected() const { if (!connected()) throw std::runtime_error("TCP client is not connected"); }
 };
 

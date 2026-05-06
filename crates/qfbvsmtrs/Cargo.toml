@@ -10,9 +10,8 @@ default = []
 wire = ["dep:smt-wire"]
 
 [dependencies]
-dashu = { version = "0.4.2", features = ["num-traits"] }
+smt-qfbv-smtlib = { path = "../smt-qfbv-smtlib" }
 smt-wire = { path = "../smt-wire", optional = true }
-yaspar = "2.7.0"
 varisat = "0.2.2"
 splr = "0.17.2"
 

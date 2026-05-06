@@ -1,4 +1,5 @@
 use crate::circuits;
+use crate::config::CancellationToken;
 use crate::error::{Error, Result};
 use crate::gates::{GateArena, GateId};
 use crate::ir::{Arena, NodeKind, Sort, TermId};
@@ -32,16 +33,24 @@ pub fn blast_query(query: &Query) -> Result<BlastResult> {
 }
 
 pub fn blast_query_with_deadline(query: &Query, deadline: Option<Instant>) -> Result<BlastResult> {
+    blast_query_with_limits(query, deadline, None)
+}
+
+pub fn blast_query_with_limits(
+    query: &Query,
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BlastResult> {
     let mut ctx = BlastContext {
         gates: GateArena::new(),
         values: vec![None; query.arena.len()],
         variables: Vec::new(),
     };
-    let reachable = reachable_terms(query, deadline)?;
+    let reachable = reachable_terms(query, deadline, cancellation)?;
 
     for (index, node) in query.arena.nodes().iter().enumerate() {
-        if index % 1024 == 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(Error::Timeout);
+        if index % 1024 == 0 {
+            check_limits(deadline, cancellation)?;
         }
         let id = TermId(index as u32);
         let include_for_model = query.want_model
@@ -380,7 +389,11 @@ fn use_constant_multiplier(bytes: &[u8], width: usize) -> bool {
         })
 }
 
-fn reachable_terms(query: &Query, deadline: Option<Instant>) -> Result<Vec<bool>> {
+fn reachable_terms(
+    query: &Query,
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<bool>> {
     let mut reachable = vec![false; query.arena.len()];
     let mut stack = query.assertions_and_assumptions().collect::<Vec<_>>();
     if let Some(target) = query.target {
@@ -388,9 +401,8 @@ fn reachable_terms(query: &Query, deadline: Option<Instant>) -> Result<Vec<bool>
     }
     let mut steps = 0usize;
     while let Some(id) = stack.pop() {
-        if steps.is_multiple_of(4096) && deadline.is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            return Err(Error::Timeout);
+        if steps.is_multiple_of(4096) {
+            check_limits(deadline, cancellation)?;
         }
         steps += 1;
         let slot = reachable.get_mut(id.index()).ok_or_else(|| {
@@ -476,6 +488,16 @@ fn push_children(arena: &Arena, id: TermId, stack: &mut Vec<TermId>) -> Result<(
                 stack.push(*value);
             }
         }
+    }
+    Ok(())
+}
+
+fn check_limits(deadline: Option<Instant>, cancellation: Option<&CancellationToken>) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(Error::Timeout);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(Error::Timeout);
     }
     Ok(())
 }

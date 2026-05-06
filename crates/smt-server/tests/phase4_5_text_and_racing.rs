@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use smt_server::{
     handle_text_frame, parse_smtlib_script, request_to_smt2, Backend, BinbitBackend,
-    QfbvsmtrsBackend, QueryResult, RacingBackend, SolveContext, Z3Backend,
+    CancellationToken, QfbvsmtrsBackend, QueryResult, RacingBackend, SolveContext, Z3Backend,
 };
 use smt_wire::{BinaryRequest, ExprBuilder};
 
@@ -470,6 +470,40 @@ fn racing_backend_respects_request_budget_while_backends_continue() {
     let result = racing.handle(&request).unwrap();
     assert!(!result.is_conclusive());
     assert!(start.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn production_backends_observe_pre_cancelled_context() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(11, 0, false, false).unwrap()).unwrap();
+
+    for backend in [
+        &BinbitBackend as &dyn Backend,
+        &QfbvsmtrsBackend as &dyn Backend,
+        &Z3Backend as &dyn Backend,
+    ] {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let context = SolveContext::new(cancellation);
+        let result = backend.handle_with_context(&request, &context).unwrap();
+        assert!(
+            !result.is_conclusive(),
+            "{} returned {result:?}",
+            backend.name()
+        );
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cancelled"),
+            "{} returned {result:?}",
+            backend.name()
+        );
+    }
 }
 
 #[test]

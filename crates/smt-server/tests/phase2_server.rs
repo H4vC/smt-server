@@ -2,14 +2,15 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use smt_server::{
     handle_binary_frame, serve_tcp, Backend, BinbitBackend, QfbvsmtrsBackend, QueryResult,
     ServerConfig, Z3Backend,
 };
 use smt_wire::{
-    le, response_flags, status, BinaryResponse, ExprBuilder, ModelBlock, NodeRef, Status,
-    UnsatCoreBlock,
+    le, response_flags, status, tag, BinaryRequest, BinaryResponse, Command, ExprBuilder,
+    ExpressionBuffer, ModelBlock, NodeRef, RawNode, Status, UnsatCoreBlock,
 };
 
 #[test]
@@ -36,6 +37,41 @@ fn binbit_backend_solves_sat_with_model() {
         .unwrap();
     assert_eq!(x_entry.value.width, 2);
     assert_eq!(x_entry.value.bytes, vec![1]);
+}
+
+#[test]
+fn binbit_backend_ignores_bv_const_unused_high_bits_by_v1_policy() {
+    let expression = ExpressionBuffer::from_parts(
+        &[
+            RawNode::new(tag::BV_CONST, 0, 0, 4, 0, 0, 0xf1),
+            RawNode::new(tag::BV_CONST, 0, 0, 4, 0, 0, 1),
+            RawNode::new(tag::BV_EQ, 2, 0, 0, 0, 0, 0),
+        ],
+        &[NodeRef::bv(0).unwrap(), NodeRef::bv(1).unwrap()],
+        &[],
+    )
+    .unwrap()
+    .into_bytes();
+    let request = BinaryRequest::new(
+        44,
+        Command::Solve,
+        0,
+        0,
+        expression,
+        vec![NodeRef::bool(2).unwrap()],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let response = handle_binary_frame(&request, &BinbitBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Sat);
 }
 
 #[test]
@@ -299,6 +335,50 @@ fn tcp_server_rejects_oversized_frame_before_allocation() {
     stream.read_exact(&mut payload).unwrap();
     let response = BinaryResponse::parse(&payload).unwrap();
     assert_eq!(response.envelope.status, Status::Error);
+    drop(stream);
+    drop(handle);
+}
+
+#[test]
+fn tcp_server_read_timeout_closes_stalled_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let handle = thread::spawn(move || {
+        let mut config = ServerConfig::new(Arc::new(BinbitBackend));
+        config.read_timeout = Some(Duration::from_millis(50));
+        config.write_timeout = Some(Duration::from_millis(500));
+        let _ = serve_tcp(addr, config);
+    });
+
+    let mut stream = None;
+    for _ in 0..100 {
+        match std::net::TcpStream::connect(addr) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let mut stream = stream.unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut byte = [0u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+            ) => {}
+        other => panic!("expected stalled connection to close or time out, got {other:?}"),
+    }
     drop(stream);
     drop(handle);
 }

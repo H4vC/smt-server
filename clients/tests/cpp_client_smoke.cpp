@@ -37,6 +37,15 @@ int main() {
     std::vector<uint8_t> response = {'S','M','T','R', 7,0,0,0, smt_wire::status::ERROR, smt_wire::response_flags::HAS_MESSAGE, 3,0,0,0, 0,0, 'b','a','d'};
     auto parsed = smt_wire::parse_response(response);
     assert(parsed.request_id == 7 && parsed.status == smt_wire::status::ERROR && parsed.payload.size() == 3);
+    bool bad_response_threw = false;
+    try {
+        std::vector<uint8_t> bad_response = {'S','M','T','R', 7,0,0,0, smt_wire::status::SAT, smt_wire::response_flags::HAS_CORE, 0,0,0,0, 0,0};
+        (void)smt_wire::parse_response(bad_response);
+    } catch (const std::invalid_argument&) { bad_response_threw = true; }
+    assert(bad_response_threw);
+    smt_wire::TcpClient client;
+    client.set_max_response_bytes(8);
+    assert(client.max_response_bytes() == 8);
     std::vector<uint8_t> model_payload;
     smt_wire::u32(model_payload, 1);
     smt_wire::u32(model_payload, x);

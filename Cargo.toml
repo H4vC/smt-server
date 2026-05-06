@@ -1,3 +1,8 @@
 [workspace]
-members = ["crates/smt-wire", "crates/smt-server", "crates/qfbvsmtrs"]
+members = [
+    "crates/smt-wire",
+    "crates/smt-server",
+    "crates/qfbvsmtrs",
+    "crates/smt-qfbv-smtlib",
+]
 resolver = "2"

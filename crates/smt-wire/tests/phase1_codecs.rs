@@ -81,6 +81,35 @@ fn wide_constant_golden_vector() {
 }
 
 #[test]
+fn expression_validator_ignores_bv_const_unused_high_bits_by_v1_policy() {
+    let inline = ExpressionBuffer::from_parts(
+        &[RawNode::new(tag::BV_CONST, 0, 0, 4, 0, 0, 0xf1)],
+        &[],
+        &[],
+    )
+    .unwrap()
+    .into_bytes();
+    ExprView::parse_and_validate(&inline).unwrap();
+
+    let wide = ExpressionBuffer::from_parts(
+        &[RawNode::new(
+            tag::BV_CONST,
+            0,
+            0,
+            65,
+            0,
+            0,
+            BlobRef::new(0, 9).to_payload(),
+        )],
+        &[],
+        &[0xff; 9],
+    )
+    .unwrap()
+    .into_bytes();
+    ExprView::parse_and_validate(&wide).unwrap();
+}
+
+#[test]
 fn named_assertion_and_unsat_core_golden_vectors() {
     let mut builder = ExprBuilder::new();
     let p = builder.bool_var("p").unwrap();
