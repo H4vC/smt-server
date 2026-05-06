@@ -1,4 +1,6 @@
-use smt_wire::{ModelBlock, OptimizationValueBlock, SimplifyBlock, UnsatCoreBlock};
+use smt_wire::{
+    request_flags, Command, ModelBlock, OptimizationValueBlock, SimplifyBlock, UnsatCoreBlock,
+};
 
 /// Solver-level status independent from the wire response envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,11 +84,40 @@ impl QueryResult {
             QueryStatus::Sat | QueryStatus::Unsat | QueryStatus::Ok
         )
     }
+
+    pub fn is_conclusive_for(&self, request: &smt_wire::BinaryRequest) -> bool {
+        match request.envelope.command {
+            Command::Solve => match self.status {
+                QueryStatus::Sat => {
+                    (request.envelope.flags & request_flags::WANT_MODEL) == 0
+                        || self.model.is_some()
+                }
+                QueryStatus::Unsat => {
+                    (request.envelope.flags & request_flags::WANT_CORE) == 0 || self.core.is_some()
+                }
+                QueryStatus::Unknown | QueryStatus::Ok => false,
+            },
+            Command::Simplify => self.status == QueryStatus::Ok && self.simplify.is_some(),
+            Command::Minimize | Command::Maximize => match self.status {
+                QueryStatus::Sat => self.optimization.as_ref().is_some_and(|optimization| {
+                    (request.envelope.flags & request_flags::WANT_MODEL) == 0
+                        || optimization.model.is_some()
+                }),
+                QueryStatus::Unsat => true,
+                QueryStatus::Unknown | QueryStatus::Ok => false,
+            },
+        }
+    }
 }
 
 /// Backend interface shared by the TCP server, racing layer, cache tests, and
 /// SMT-LIB path.
 pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
+
+    fn supports_qfbvsmtrs_text_fallback(&self) -> bool {
+        false
+    }
+
     fn handle(&self, request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult>;
 }

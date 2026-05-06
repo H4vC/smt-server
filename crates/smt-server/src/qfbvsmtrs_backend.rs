@@ -14,6 +14,10 @@ impl Backend for QfbvsmtrsBackend {
         "qfbvsmtrs"
     }
 
+    fn supports_qfbvsmtrs_text_fallback(&self) -> bool {
+        true
+    }
+
     fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         match request.envelope.command {
             Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
@@ -35,6 +39,19 @@ fn scalar_to_wire(value: &qfbvsmtrs::ScalarValue) -> smt_wire::Result<ScalarValu
 }
 
 fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+    let request = request.clone();
+    let worker = std::thread::Builder::new()
+        .name("qfbvsmtrs-backend".to_owned())
+        .stack_size(qfbvsmtrs::DEFAULT_WORKER_STACK_BYTES)
+        .spawn(move || solve_on_worker(&request))
+        .map_err(|err| smt_wire::WireError::invalid("qfbvsmtrs worker", err.to_string()))?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(_) => Ok(QueryResult::unknown("qfbvsmtrs worker panicked")),
+    }
+}
+
+fn solve_on_worker(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
     let query = match qfbvsmtrs::query_from_wire(request) {
         Ok(query) => query,
         Err(err) => return Ok(QueryResult::unknown(format!("qfbvsmtrs: {err}"))),
@@ -44,7 +61,13 @@ fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
     } else {
         Some(Duration::from_millis(u64::from(request.envelope.budget_ms)))
     };
-    let config = qfbvsmtrs::Config::default().with_budget(budget);
+    let mut config = qfbvsmtrs::Config::default().with_budget(budget);
+    if budget.is_some() {
+        // SPLR's library timeout can be conservative under some workloads.
+        // The server adapter uses the polling DPLL backend for budgeted
+        // qfbvsmtrs requests so request deadlines are hard-bounded in-process.
+        config = config.with_sat_backend(qfbvsmtrs::SatBackendKind::Dpll);
+    }
     let mut solver = qfbvsmtrs::Solver::new(config);
     let result = match solver.solve(&query) {
         Ok(result) => result,

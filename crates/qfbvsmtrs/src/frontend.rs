@@ -12,7 +12,7 @@ use yaspar::{
 
 use crate::builder::Builder;
 use crate::error::{Error, Result};
-use crate::ir::TermId;
+use crate::ir::{validate_bv_width, TermId};
 use crate::model::{scalar_to_smt, Model, ScalarValue};
 use crate::query::Query;
 use crate::solver::{SolveResult, SolveStatus};
@@ -48,6 +48,7 @@ struct ScriptState {
     builder: Builder,
     env: HashMap<String, Binding>,
     functions: HashMap<String, FunctionBinding>,
+    expansion_depth: usize,
     saw_check_sat: bool,
 }
 
@@ -123,6 +124,8 @@ pub fn format_smt2_response(query: &Query, result: &SolveResult) -> String {
                     } else {
                         out.push_str(&format_get_values(model, &query.get_values));
                     }
+                } else {
+                    return format_unknown(Some("solver omitted requested model"));
                 }
             }
             out
@@ -139,13 +142,25 @@ pub fn format_smt2_response(query: &Query, result: &SolveResult) -> String {
                         out.push_str(&quote_symbol(name));
                     }
                     out.push_str(")\n");
+                } else {
+                    return format_unknown(Some("solver omitted requested unsat core"));
                 }
             }
             out
         }
-        SolveStatus::Unknown => "unknown\n".to_owned(),
+        SolveStatus::Unknown => format_unknown(result.message.as_deref()),
         SolveStatus::Ok => "success\n".to_owned(),
     }
+}
+
+fn format_unknown(message: Option<&str>) -> String {
+    let mut out = "unknown\n".to_owned();
+    if let Some(message) = message.filter(|message| !message.is_empty()) {
+        out.push_str("; ");
+        out.push_str(message);
+        out.push('\n');
+    }
+    out
 }
 
 fn declare_const(state: &mut ScriptState, list: &[SExpr]) -> Result<()> {
@@ -232,7 +247,14 @@ fn parse_function_params(expr: &SExpr) -> Result<Vec<(String, SmtSort)>> {
                 "argument pair must have name and sort",
             ));
         }
-        params.push((atom(&pair[0])?.to_owned(), parse_sort(&pair[1])?));
+        let name = atom(&pair[0])?.to_owned();
+        if params.iter().any(|(existing, _)| existing == &name) {
+            return Err(Error::invalid(
+                "define-fun",
+                format!("duplicate argument {name:?}"),
+            ));
+        }
+        params.push((name, parse_sort(&pair[1])?));
     }
     Ok(params)
 }
@@ -323,20 +345,33 @@ fn named_annotation(expr: &SExpr) -> Result<Option<(&SExpr, String)>> {
     let SExpr::List(items) = expr else {
         return Ok(None);
     };
-    if items.len() >= 4 && atom(&items[0])? == "!" {
-        let mut name = None;
-        let mut index = 2;
-        while index + 1 < items.len() {
-            if atom(&items[index])? == ":named" {
-                name = Some(atom(&items[index + 1])?.to_owned());
-            }
-            index += 2;
+    let Some((term, name)) = parse_annotation(items)? else {
+        return Ok(None);
+    };
+    Ok(name.map(|name| (term, name)))
+}
+
+fn parse_annotation(items: &[SExpr]) -> Result<Option<(&SExpr, Option<String>)>> {
+    if items.is_empty() || atom(&items[0])? != "!" {
+        return Ok(None);
+    }
+    if items.len() < 4 || !(items.len() - 2).is_multiple_of(2) {
+        return Err(Error::invalid(
+            "annotation",
+            "expected annotated term followed by keyword/value pairs",
+        ));
+    }
+    let mut name = None;
+    for pair in items[2..].chunks_exact(2) {
+        let key = atom(&pair[0])?;
+        if !key.starts_with(':') {
+            return Err(Error::invalid("annotation", "expected annotation keyword"));
         }
-        if let Some(name) = name {
-            return Ok(Some((&items[1], name)));
+        if key == ":named" {
+            name = Some(atom(&pair[1])?.to_owned());
         }
     }
-    Ok(None)
+    Ok(Some((&items[1], name)))
 }
 
 fn parse_expr_with_locals(
@@ -409,7 +444,12 @@ fn parse_list_expr(
         return parse_function_call(state, op, &items[1..], locals);
     }
     match op {
-        "!" => parse_expr_with_locals(state, &items[1], locals),
+        "!" => {
+            let Some((term, _)) = parse_annotation(items)? else {
+                return Err(Error::invalid("annotation", "expected annotation"));
+            };
+            parse_expr_with_locals(state, term, locals)
+        }
         "let" => parse_let(state, items, locals),
         "ite" => parse_ite(state, items, locals),
         "=" => parse_equals(state, &items[1..], locals),
@@ -481,13 +521,22 @@ fn parse_function_call(
             ),
         ));
     }
+    if state.expansion_depth >= 64 {
+        return Err(Error::invalid(
+            "function call",
+            "macro expansion depth exceeded",
+        ));
+    }
     let mut expanded_locals = locals.clone();
     for ((param_name, param_sort), arg_expr) in function.params.iter().zip(args) {
         let value = parse_expr_with_locals(state, arg_expr, locals)?;
         expect_sort(value.sort, *param_sort, "function argument")?;
         expanded_locals.insert(param_name.clone(), value);
     }
-    let value = parse_expr_with_locals(state, &function.body, &mut expanded_locals)?;
+    state.expansion_depth += 1;
+    let value = parse_expr_with_locals(state, &function.body, &mut expanded_locals);
+    state.expansion_depth -= 1;
+    let value = value?;
     expect_sort(value.sort, function.result, "function result")?;
     Ok(value)
 }
@@ -534,6 +583,7 @@ fn parse_indexed_literal(state: &mut ScriptState, items: &[SExpr]) -> Result<Bin
     } else {
         return Err(Error::invalid("indexed literal", "expected (_ bvN W)"));
     };
+    validate_bv_width(width, "bv literal")?;
     let bytes = decimal_to_le_bytes(value, (width as usize).div_ceil(8))?;
     Ok(Binding {
         node: state.builder.bv_const_bytes(&bytes, width)?,
@@ -557,9 +607,13 @@ fn parse_indexed_op(
         let SmtSort::Bv(_) = x.sort else {
             return Err(Error::invalid("extract", "argument is not BV"));
         };
+        let result_width = hi
+            .checked_sub(lo)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| Error::invalid("extract", "invalid bounds"))?;
         return Ok(Binding {
             node: state.builder.bv_extract(x.node, hi, lo)?,
-            sort: SmtSort::Bv(hi - lo + 1),
+            sort: SmtSort::Bv(result_width),
         });
     }
     if op_items.len() == 3 && atom(&op_items[0])? == "_" {
@@ -574,15 +628,27 @@ fn parse_indexed_op(
         return match atom(&op_items[1])? {
             "zero_extend" => Ok(Binding {
                 node: state.builder.bv_zext(x.node, amount)?,
-                sort: SmtSort::Bv(width + amount),
+                sort: SmtSort::Bv(
+                    width
+                        .checked_add(amount)
+                        .ok_or_else(|| Error::invalid("zero_extend", "width overflow"))?,
+                ),
             }),
             "sign_extend" => Ok(Binding {
                 node: state.builder.bv_sext(x.node, amount)?,
-                sort: SmtSort::Bv(width + amount),
+                sort: SmtSort::Bv(
+                    width
+                        .checked_add(amount)
+                        .ok_or_else(|| Error::invalid("sign_extend", "width overflow"))?,
+                ),
             }),
             "repeat" => Ok(Binding {
                 node: state.builder.bv_repeat(x.node, amount)?,
-                sort: SmtSort::Bv(width * amount),
+                sort: SmtSort::Bv(
+                    width
+                        .checked_mul(amount)
+                        .ok_or_else(|| Error::invalid("repeat", "width overflow"))?,
+                ),
             }),
             "rotate_left" => Ok(Binding {
                 node: state.builder.bv_rotate_left(x.node, amount)?,

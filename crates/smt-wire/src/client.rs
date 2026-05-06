@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use crate::{BinaryResponse, WireError};
 
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub enum ClientError {
     Io(std::io::Error),
@@ -23,10 +25,7 @@ impl fmt::Display for ClientError {
             ClientError::Wire(err) => write!(f, "wire-format error: {err}"),
             ClientError::Utf8(err) => write!(f, "UTF-8 error: {err}"),
             ClientError::FrameTooLarge(len) => {
-                write!(
-                    f,
-                    "frame payload is too large for u32 length prefix: {len} bytes"
-                )
+                write!(f, "frame payload exceeds configured limit: {len} bytes")
             }
         }
     }
@@ -63,17 +62,26 @@ impl From<FromUtf8Error> for ClientError {
 
 pub struct TcpClient {
     stream: TcpStream,
+    max_response_bytes: usize,
 }
 
 impl TcpClient {
     pub fn connect(addr: impl ToSocketAddrs) -> ClientResult<Self> {
         Ok(Self {
             stream: TcpStream::connect(addr)?,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         })
     }
 
     pub fn from_stream(stream: TcpStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
+
+    pub fn set_max_response_bytes(&mut self, max_response_bytes: usize) {
+        self.max_response_bytes = max_response_bytes;
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -93,6 +101,9 @@ impl TcpClient {
         let mut len_bytes = [0u8; 4];
         self.stream.read_exact(&mut len_bytes)?;
         let response_len = u32::from_le_bytes(len_bytes) as usize;
+        if response_len > self.max_response_bytes {
+            return Err(ClientError::FrameTooLarge(response_len));
+        }
         let mut response = vec![0u8; response_len];
         self.stream.read_exact(&mut response)?;
         Ok(response)

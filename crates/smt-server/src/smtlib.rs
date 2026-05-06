@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use dashu::{float::DBig, integer::UBig};
 use smt_wire::{
@@ -42,10 +43,19 @@ struct Binding {
     sort: SmtSort,
 }
 
+#[derive(Debug, Clone)]
+struct FunctionBinding {
+    params: Vec<(String, SmtSort)>,
+    result: SmtSort,
+    body: SExpr,
+}
+
 #[derive(Debug, Default)]
 struct ScriptState {
     builder: ExprBuilder,
     env: HashMap<String, Binding>,
+    functions: HashMap<String, FunctionBinding>,
+    expansion_depth: usize,
     want_model: bool,
     want_core: bool,
     get_values: Vec<String>,
@@ -78,7 +88,7 @@ pub fn parse_smtlib_script(script: &str) -> smt_wire::Result<TextQuery> {
                     ));
                 }
             }
-            "set-option" | "exit" => {}
+            "set-info" | "set-option" | "exit" => {}
             "push" | "pop" | "reset" => {
                 return Err(WireError::invalid(
                     "SMT-LIB incremental command",
@@ -127,12 +137,82 @@ pub fn handle_text_frame(frame_payload: &[u8], backend: &dyn Backend) -> smt_wir
         .map_err(|_| WireError::invalid("SMT-LIB frontend", "text request is not UTF-8"))?;
     let query = match parse_smtlib_script(script) {
         Ok(query) => query,
-        Err(err) => return Ok(format!("(error {:?})\n", err.to_string()).into_bytes()),
+        Err(err) => {
+            if allows_qfbvsmtrs_text_fallback(backend) {
+                return Ok(handle_qfbvsmtrs_text_fallback(script, &err).into_bytes());
+            }
+            return Ok(format!("(error {:?})\n", err.to_string()).into_bytes());
+        }
     };
     match backend.handle(&query.request) {
         Ok(result) => Ok(text_response(&query, result).into_bytes()),
         Err(err) => Ok(format!("(error {:?})\n", err.to_string()).into_bytes()),
     }
+}
+
+fn allows_qfbvsmtrs_text_fallback(backend: &dyn Backend) -> bool {
+    backend.supports_qfbvsmtrs_text_fallback()
+}
+
+fn handle_qfbvsmtrs_text_fallback(script: &str, frontend_error: &WireError) -> String {
+    let script = script.to_owned();
+    let frontend_error = frontend_error.to_string();
+    let worker = match std::thread::Builder::new()
+        .name("qfbvsmtrs-text-fallback".to_owned())
+        .stack_size(qfbvsmtrs::DEFAULT_WORKER_STACK_BYTES)
+        .spawn(move || handle_qfbvsmtrs_text_fallback_on_worker(&script, &frontend_error))
+    {
+        Ok(worker) => worker,
+        Err(err) => {
+            return format!(
+                "(error {:?})\n",
+                format!("qfbvsmtrs fallback worker: {err}")
+            )
+        }
+    };
+    match worker.join() {
+        Ok(response) => response,
+        Err(_) => "(error \"qfbvsmtrs fallback worker panicked\")\n".to_owned(),
+    }
+}
+
+fn handle_qfbvsmtrs_text_fallback_on_worker(script: &str, frontend_error: &str) -> String {
+    let query = match qfbvsmtrs::parse_smt2(script) {
+        Ok(query) => query,
+        Err(err) => {
+            return format!(
+                "(error {:?})\n",
+                format!("{frontend_error}; qfbvsmtrs fallback: {err}")
+            )
+        }
+    };
+    let config = match qfbvsmtrs_text_config() {
+        Ok(config) => config,
+        Err(err) => return format!("(error {:?})\n", err),
+    };
+    let mut solver = qfbvsmtrs::Solver::new(config);
+    match solver.solve(&query) {
+        Ok(result) => qfbvsmtrs::format_smt2_response(&query, &result),
+        Err(err) => format!("(error {:?})\n", format!("qfbvsmtrs fallback: {err}")),
+    }
+}
+
+fn qfbvsmtrs_text_config() -> std::result::Result<qfbvsmtrs::Config, String> {
+    let budget_ms = match std::env::var("SMT_SERVER_TEXT_QFBVSMTRS_BUDGET_MS") {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            "invalid SMT_SERVER_TEXT_QFBVSMTRS_BUDGET_MS: expected integer milliseconds".to_owned()
+        })?,
+        Err(std::env::VarError::NotPresent) => 30_000,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("invalid SMT_SERVER_TEXT_QFBVSMTRS_BUDGET_MS: not UTF-8".to_owned())
+        }
+    };
+    let budget = (budget_ms != 0).then(|| Duration::from_millis(budget_ms));
+    let mut config = qfbvsmtrs::Config::default().with_budget(budget);
+    if budget.is_some() {
+        config = config.with_sat_backend(qfbvsmtrs::SatBackendKind::Dpll);
+    }
+    Ok(config)
 }
 
 fn declare_const(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Result<()> {
@@ -198,24 +278,56 @@ fn define_fun(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Result<()> {
             "expected name, args, sort, body",
         ));
     }
-    match &list[2] {
-        SExpr::List(args) if args.is_empty() => {}
-        _ => {
+    let name = atom(&list[1])?.to_owned();
+    let params = parse_function_params(&list[2])?;
+    if params.is_empty() {
+        return define_const(
+            state,
+            &[
+                list[0].clone(),
+                list[1].clone(),
+                list[3].clone(),
+                list[4].clone(),
+            ],
+        );
+    }
+    let result = parse_sort(&list[3])?;
+    state.functions.insert(
+        name,
+        FunctionBinding {
+            params,
+            result,
+            body: list[4].clone(),
+        },
+    );
+    Ok(())
+}
+
+fn parse_function_params(expr: &SExpr) -> smt_wire::Result<Vec<(String, SmtSort)>> {
+    let SExpr::List(params) = expr else {
+        return Err(WireError::invalid("define-fun", "expected parameter list"));
+    };
+    let mut out = Vec::with_capacity(params.len());
+    for param in params {
+        let SExpr::List(items) = param else {
+            return Err(WireError::invalid("define-fun", "bad parameter"));
+        };
+        if items.len() != 2 {
             return Err(WireError::invalid(
                 "define-fun",
-                "only 0-arity functions are supported",
-            ))
+                "expected parameter name and sort",
+            ));
         }
+        let name = atom(&items[0])?.to_owned();
+        if out.iter().any(|(existing, _)| existing == &name) {
+            return Err(WireError::invalid(
+                "define-fun",
+                format!("duplicate parameter {name:?}"),
+            ));
+        }
+        out.push((name, parse_sort(&items[1])?));
     }
-    define_const(
-        state,
-        &[
-            list[0].clone(),
-            list[1].clone(),
-            list[3].clone(),
-            list[4].clone(),
-        ],
-    )
+    Ok(out)
 }
 
 fn assert_command(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Result<()> {
@@ -286,20 +398,36 @@ fn named_annotation(expr: &SExpr) -> smt_wire::Result<Option<(&SExpr, String)>> 
     let SExpr::List(items) = expr else {
         return Ok(None);
     };
-    if items.len() >= 4 && atom(&items[0])? == "!" {
-        let mut name = None;
-        let mut index = 2;
-        while index + 1 < items.len() {
-            if atom(&items[index])? == ":named" {
-                name = Some(atom(&items[index + 1])?.to_owned());
-            }
-            index += 2;
+    let Some((term, name)) = parse_annotation(items)? else {
+        return Ok(None);
+    };
+    Ok(name.map(|name| (term, name)))
+}
+
+fn parse_annotation(items: &[SExpr]) -> smt_wire::Result<Option<(&SExpr, Option<String>)>> {
+    if items.is_empty() || atom(&items[0])? != "!" {
+        return Ok(None);
+    }
+    if items.len() < 4 || !(items.len() - 2).is_multiple_of(2) {
+        return Err(WireError::invalid(
+            "annotation",
+            "expected annotated term followed by keyword/value pairs",
+        ));
+    }
+    let mut name = None;
+    for pair in items[2..].chunks_exact(2) {
+        let key = atom(&pair[0])?;
+        if !key.starts_with(':') {
+            return Err(WireError::invalid(
+                "annotation",
+                "expected annotation keyword",
+            ));
         }
-        if let Some(name) = name {
-            return Ok(Some((&items[1], name)));
+        if key == ":named" {
+            name = Some(atom(&pair[1])?.to_owned());
         }
     }
-    Ok(None)
+    Ok(Some((&items[1], name)))
 }
 
 fn parse_expr_with_locals(
@@ -415,7 +543,12 @@ fn parse_list_expr(
     }
     let op = atom(&items[0])?;
     match op {
-        "!" => parse_expr_with_locals(state, &items[1], locals),
+        "!" => {
+            let Some((term, _)) = parse_annotation(items)? else {
+                return Err(WireError::invalid("annotation", "expected annotation"));
+            };
+            parse_expr_with_locals(state, term, locals)
+        }
         "let" => parse_let(state, items, locals),
         "ite" => {
             expect_len(items, 4, "ite")?;
@@ -436,6 +569,7 @@ fn parse_list_expr(
             }
         }
         "=" => parse_equals(state, &items[1..], locals),
+        "distinct" => parse_distinct(state, &items[1..], locals),
         "not" => unary_bool(state, items, locals, |b, x| b.bool_not(x)),
         "and" => fold_bool(state, &items[1..], locals, true, |b, a, c| b.bool_and(a, c)),
         "or" => fold_bool(state, &items[1..], locals, false, |b, a, c| b.bool_or(a, c)),
@@ -465,27 +599,129 @@ fn parse_list_expr(
         "bvsle" => bv_cmp(state, items, locals, |b, a, c| b.bv_sle(a, c)),
         "bvsgt" => bv_cmp(state, items, locals, |b, a, c| b.bv_sgt(a, c)),
         "bvsge" => bv_cmp(state, items, locals, |b, a, c| b.bv_sge(a, c)),
-        other => Err(WireError::invalid(
-            "SMT-LIB expression",
-            format!("unsupported operator {other}"),
-        )),
+        other => {
+            if let Some(function) = state.functions.get(other).cloned() {
+                parse_function_call(state, other, &function, &items[1..], locals)
+            } else {
+                Err(WireError::invalid(
+                    "SMT-LIB expression",
+                    format!("unsupported operator {other}"),
+                ))
+            }
+        }
     }
 }
 
-fn parse_indexed_literal(state: &mut ScriptState, items: &[SExpr]) -> smt_wire::Result<Binding> {
-    if items.len() == 4 && atom(&items[1])? == "bv" {
-        let value = atom(&items[2])?
-            .parse::<u64>()
-            .map_err(|_| WireError::invalid("bv literal", "invalid value"))?;
-        let width = atom(&items[3])?
-            .parse::<u32>()
-            .map_err(|_| WireError::invalid("bv literal", "invalid width"))?;
-        return Ok(Binding {
-            node: state.builder.bv_const(value, width)?,
-            sort: SmtSort::Bv(width),
-        });
+fn parse_function_call(
+    state: &mut ScriptState,
+    name: &str,
+    function: &FunctionBinding,
+    args: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+) -> smt_wire::Result<Binding> {
+    if args.len() != function.params.len() {
+        return Err(WireError::invalid(
+            "define-fun application",
+            format!(
+                "{name} expected {} arguments, got {}",
+                function.params.len(),
+                args.len()
+            ),
+        ));
     }
-    Err(WireError::invalid("indexed literal", "expected (_ bvN W)"))
+    if state.expansion_depth >= 64 {
+        return Err(WireError::invalid(
+            "define-fun application",
+            "macro expansion depth exceeded",
+        ));
+    }
+    let mut expansion_locals = HashMap::with_capacity(function.params.len());
+    for ((param_name, param_sort), arg) in function.params.iter().zip(args) {
+        let binding = parse_expr_with_locals(state, arg, locals)?;
+        expect_sort(binding.sort, *param_sort, "define-fun application")?;
+        expansion_locals.insert(param_name.clone(), binding);
+    }
+    state.expansion_depth += 1;
+    let result = parse_expr_with_locals(state, &function.body, &mut expansion_locals);
+    state.expansion_depth -= 1;
+    let binding = result?;
+    expect_sort(binding.sort, function.result, "define-fun result")?;
+    Ok(binding)
+}
+
+fn parse_indexed_literal(state: &mut ScriptState, items: &[SExpr]) -> smt_wire::Result<Binding> {
+    let literal = if items.len() == 4 && atom(&items[1])? == "bv" {
+        Some((atom(&items[2])?, atom(&items[3])?))
+    } else if items.len() == 3 {
+        let symbol = atom(&items[1])?;
+        if let Some(value) = symbol.strip_prefix("bv") {
+            Some((value, atom(&items[2])?))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let Some((value, width)) = literal else {
+        return Err(WireError::invalid("indexed literal", "expected (_ bvN W)"));
+    };
+    if value.is_empty() {
+        return Err(WireError::invalid("bv literal", "missing value"));
+    }
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| WireError::invalid("bv literal", "invalid width"))?;
+    validate_bv_width(width, "bv literal")?;
+    let bytes = decimal_literal_bytes(value, width)?;
+    let node = if width <= 64 {
+        let mut raw = [0u8; 8];
+        raw[..bytes.len()].copy_from_slice(&bytes);
+        state.builder.bv_const(u64::from_le_bytes(raw), width)?
+    } else {
+        state.builder.bv_const_wide(&bytes, width)?
+    };
+    Ok(Binding {
+        node,
+        sort: SmtSort::Bv(width),
+    })
+}
+
+fn validate_bv_width(width: u32, context: &'static str) -> smt_wire::Result<()> {
+    if !(1..=smt_wire::MAX_BV_WIDTH).contains(&width) {
+        return Err(WireError::invalid(
+            context,
+            format!("width {width} is outside 1..={}", smt_wire::MAX_BV_WIDTH),
+        ));
+    }
+    Ok(())
+}
+
+fn decimal_literal_bytes(value: &str, width: u32) -> smt_wire::Result<Vec<u8>> {
+    let mut bytes = vec![0u8; (width as usize).div_ceil(8)];
+    for ch in value.bytes() {
+        let digit = match ch {
+            b'0'..=b'9' => ch - b'0',
+            _ => return Err(WireError::invalid("bv literal", "invalid decimal value")),
+        };
+        let mut carry = u16::from(digit);
+        for byte in &mut bytes {
+            let next = u16::from(*byte) * 10 + carry;
+            *byte = next as u8;
+            carry = next >> 8;
+        }
+        mask_unused_high_bits(width, &mut bytes);
+    }
+    Ok(bytes)
+}
+
+fn mask_unused_high_bits(width: u32, bytes: &mut [u8]) {
+    let valid_bits = width % 8;
+    if valid_bits != 0 && !bytes.is_empty() {
+        let mask = (1u8 << valid_bits) - 1;
+        if let Some(last) = bytes.last_mut() {
+            *last &= mask;
+        }
+    }
 }
 
 fn parse_indexed_op(
@@ -508,12 +744,19 @@ fn parse_indexed_op(
         let SmtSort::Bv(_) = x.sort else {
             return Err(WireError::invalid("extract", "argument is not BV"));
         };
+        let result_width = hi
+            .checked_sub(lo)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(WireError::invalid("extract", "invalid bounds"))?;
         return Ok(Binding {
             node: state.builder.bv_extract(x.node, hi, lo)?,
-            sort: SmtSort::Bv(hi - lo + 1),
+            sort: SmtSort::Bv(result_width),
         });
     }
     if op_items.len() == 3 && atom(&op_items[0])? == "_" {
+        if args.len() != 1 {
+            return Err(WireError::invalid("extension", "expected one argument"));
+        }
         let amount = atom(&op_items[2])?
             .parse::<u16>()
             .map_err(|_| WireError::invalid("extension", "bad amount"))?;
@@ -521,14 +764,17 @@ fn parse_indexed_op(
         let SmtSort::Bv(width) = x.sort else {
             return Err(WireError::invalid("extension", "argument is not BV"));
         };
+        let result_width = width
+            .checked_add(u32::from(amount))
+            .ok_or(WireError::IntegerOverflow("extension width"))?;
         return match atom(&op_items[1])? {
             "zero_extend" => Ok(Binding {
                 node: state.builder.bv_zext(x.node, amount)?,
-                sort: SmtSort::Bv(width + u32::from(amount)),
+                sort: SmtSort::Bv(result_width),
             }),
             "sign_extend" => Ok(Binding {
                 node: state.builder.bv_sext(x.node, amount)?,
-                sort: SmtSort::Bv(width + u32::from(amount)),
+                sort: SmtSort::Bv(result_width),
             }),
             _ => Err(WireError::invalid(
                 "indexed operator",
@@ -570,21 +816,57 @@ fn parse_equals(
     args: &[SExpr],
     locals: &mut HashMap<String, Binding>,
 ) -> smt_wire::Result<Binding> {
-    if args.len() != 2 {
-        return Err(WireError::invalid("=", "expected two arguments"));
+    if args.len() < 2 {
+        return Err(WireError::invalid("=", "expected at least two arguments"));
     }
-    let a = parse_expr_with_locals(state, &args[0], locals)?;
-    let b = parse_expr_with_locals(state, &args[1], locals)?;
+    let first = parse_expr_with_locals(state, &args[0], locals)?;
+    let mut result = state.builder.bool_true()?;
+    let mut previous = first;
+    for arg in &args[1..] {
+        let next = parse_expr_with_locals(state, arg, locals)?;
+        let eq = equality_node(state, previous.clone(), next.clone(), "=")?;
+        result = state.builder.bool_and(result, eq)?;
+        previous = next;
+    }
+    Ok(Binding {
+        node: result,
+        sort: SmtSort::Bool,
+    })
+}
+
+fn parse_distinct(
+    state: &mut ScriptState,
+    args: &[SExpr],
+    locals: &mut HashMap<String, Binding>,
+) -> smt_wire::Result<Binding> {
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        values.push(parse_expr_with_locals(state, arg, locals)?);
+    }
+    let mut result = state.builder.bool_true()?;
+    for i in 0..values.len() {
+        for j in i + 1..values.len() {
+            let eq = equality_node(state, values[i].clone(), values[j].clone(), "distinct")?;
+            let ne = state.builder.bool_not(eq)?;
+            result = state.builder.bool_and(result, ne)?;
+        }
+    }
+    Ok(Binding {
+        node: result,
+        sort: SmtSort::Bool,
+    })
+}
+
+fn equality_node(
+    state: &mut ScriptState,
+    a: Binding,
+    b: Binding,
+    context: &'static str,
+) -> smt_wire::Result<NodeRef> {
     match (a.sort, b.sort) {
-        (SmtSort::Bool, SmtSort::Bool) => Ok(Binding {
-            node: state.builder.bool_eq(a.node, b.node)?,
-            sort: SmtSort::Bool,
-        }),
-        (SmtSort::Bv(w1), SmtSort::Bv(w2)) if w1 == w2 => Ok(Binding {
-            node: state.builder.bv_eq(a.node, b.node)?,
-            sort: SmtSort::Bool,
-        }),
-        _ => Err(WireError::invalid("=", "argument sorts differ")),
+        (SmtSort::Bool, SmtSort::Bool) => state.builder.bool_eq(a.node, b.node),
+        (SmtSort::Bv(w1), SmtSort::Bv(w2)) if w1 == w2 => state.builder.bv_eq(a.node, b.node),
+        _ => Err(WireError::invalid(context, "argument sorts differ")),
     }
 }
 
@@ -711,6 +993,7 @@ fn parse_sort(expr: &SExpr) -> smt_wire::Result<SmtSort> {
             let width = atom(&items[2])?
                 .parse::<u32>()
                 .map_err(|_| WireError::invalid("sort", "invalid BitVec width"))?;
+            validate_bv_width(width, "sort")?;
             Ok(SmtSort::Bv(width))
         }
         _ => Err(WireError::invalid("sort", "expected Bool or (_ BitVec n)")),
@@ -736,6 +1019,8 @@ fn text_response(query: &TextQuery, result: QueryResult) -> String {
                                 }),
                         );
                     }
+                } else {
+                    return format_unknown(Some("backend omitted requested model"));
                 }
             }
             out
@@ -745,13 +1030,25 @@ fn text_response(query: &TextQuery, result: QueryResult) -> String {
             if query.want_core {
                 if let Some(core) = result.core {
                     out.push_str(&format_core(&core));
+                } else {
+                    return format_unknown(Some("backend omitted requested unsat core"));
                 }
             }
             out
         }
-        QueryStatus::Unknown => "unknown\n".to_owned(),
+        QueryStatus::Unknown => format_unknown(result.message.as_deref()),
         QueryStatus::Ok => "success\n".to_owned(),
     }
+}
+
+fn format_unknown(message: Option<&str>) -> String {
+    let mut out = "unknown\n".to_owned();
+    if let Some(message) = message.filter(|message| !message.is_empty()) {
+        out.push_str("; ");
+        out.push_str(message);
+        out.push('\n');
+    }
+    out
 }
 
 fn format_model(request: &BinaryRequest, model: &ModelBlock) -> smt_wire::Result<String> {

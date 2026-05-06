@@ -58,6 +58,14 @@ impl RequestEnvelope {
         })?;
         let flags = le::read_u8(bytes, 9, "request flags")?;
         validate_request_flags(flags)?;
+        validate_command_flags(command, flags)?;
+        let reserved = le::read_u32(bytes, 28, "request reserved")?;
+        if reserved != 0 {
+            return Err(WireError::invalid(
+                "request reserved",
+                format!("expected 0, got {reserved}"),
+            ));
+        }
         Ok(Self {
             request_id: le::read_u32(bytes, 4, "request id")?,
             command,
@@ -292,6 +300,7 @@ impl BinaryRequest {
                 }
             }
         }
+        validate_command_flags(self.envelope.command, self.envelope.flags)?;
         match self.envelope.command {
             Command::Minimize | Command::Maximize => {
                 validate_node_ref(
@@ -301,7 +310,14 @@ impl BinaryRequest {
                     "target_node",
                 )?;
             }
-            Command::Solve | Command::Simplify => {}
+            Command::Solve | Command::Simplify => {
+                if self.envelope.target_node != 0 {
+                    return Err(WireError::invalid(
+                        "request target_node",
+                        "target_node is only valid for optimization commands",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -331,6 +347,36 @@ pub fn validate_request_flags(flags: u8) -> Result<()> {
             "request flags",
             format!("unknown flag bits {unknown:#04x}"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_command_flags(command: Command, flags: u8) -> Result<()> {
+    match command {
+        Command::Solve => {
+            if (flags & request_flags::SIGNED) != 0 {
+                return Err(WireError::invalid(
+                    "request flags",
+                    "SIGNED is only valid for optimization commands",
+                ));
+            }
+        }
+        Command::Simplify => {
+            if flags != 0 {
+                return Err(WireError::invalid(
+                    "request flags",
+                    "SIMPLIFY does not accept request flags",
+                ));
+            }
+        }
+        Command::Minimize | Command::Maximize => {
+            if (flags & request_flags::WANT_CORE) != 0 {
+                return Err(WireError::invalid(
+                    "request flags",
+                    "WANT_CORE is not valid for optimization commands",
+                ));
+            }
+        }
     }
     Ok(())
 }

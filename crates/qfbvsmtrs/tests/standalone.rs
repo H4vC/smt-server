@@ -1,8 +1,37 @@
+use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 
 use qfbvsmtrs::{
-    solve_smt2, Builder, Command, Config, SatBackendKind, ScalarValue, SolveStatus, Solver,
+    format_smt2_response, parse_smt2, solve_smt2, Builder, Command, Config, SatBackendKind,
+    ScalarValue, SolveResult, SolveStatus, Solver,
 };
+
+#[test]
+fn standalone_cli_supports_budget_backend_and_input_bound() {
+    let exe = env!("CARGO_BIN_EXE_qfbvsmtrs");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("known")
+        .join("simple_unsat.smt2");
+    let output = ProcessCommand::new(exe)
+        .args(["--budget-ms", "1000", "--sat-backend", "dpll"])
+        .arg(&fixture)
+        .output()
+        .expect("run qfbvsmtrs CLI");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "unsat\n");
+
+    let output = ProcessCommand::new(exe)
+        .args(["--max-input-bytes", "1"])
+        .arg(&fixture)
+        .output()
+        .expect("run qfbvsmtrs CLI input-bound smoke");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("input exceeds"), "{stderr}");
+}
 
 #[test]
 fn all_sat_backends_solve_basic_sat_and_unsat() {
@@ -99,6 +128,52 @@ fn supports_push_pop_in_standalone_script() {
             bytes: vec![2]
         })
     );
+}
+
+#[test]
+fn standalone_formatter_does_not_claim_missing_requested_artifacts() {
+    let model_query = parse_smt2(
+        r#"
+(set-logic QF_BV)
+(declare-const x (_ BitVec 1))
+(check-sat)
+(get-model)
+"#,
+    )
+    .unwrap();
+    let text = format_smt2_response(&model_query, &SolveResult::sat(None));
+    assert!(text.starts_with("unknown\n"), "{text}");
+    assert!(text.contains("requested model"), "{text}");
+
+    let core_query = parse_smt2(
+        r#"
+(set-logic QF_BV)
+(declare-const p Bool)
+(assert (! p :named p))
+(check-sat)
+(get-unsat-core)
+"#,
+    )
+    .unwrap();
+    let text = format_smt2_response(&core_query, &SolveResult::unsat());
+    assert!(text.starts_with("unknown\n"), "{text}");
+    assert!(text.contains("requested unsat core"), "{text}");
+
+    let text = format_smt2_response(&model_query, &SolveResult::unknown("budget exhausted"));
+    assert!(text.contains("budget exhausted"), "{text}");
+}
+
+#[test]
+fn smt2_frontend_rejects_malformed_constructs_without_panic() {
+    assert!(parse_smt2("(set-logic QF_BV) (assert (! :named a)) (check-sat)").is_err());
+    assert!(parse_smt2("(set-logic QF_BV) (assert (! true :named)) (check-sat)").is_err());
+    assert!(parse_smt2("(set-logic QF_BV) (assert (! true named a)) (check-sat)").is_err());
+    assert!(parse_smt2("(set-logic QF_BV) (assert (! true :foo bar)) (check-sat)").is_ok());
+    assert!(parse_smt2("(set-logic QF_BV) (assert ((_ extract 0 1) #b0)) (check-sat)").is_err());
+    assert!(parse_smt2(
+        "(set-logic QF_BV) (define-fun f ((x Bool) (x Bool)) Bool x) (assert true) (check-sat)"
+    )
+    .is_err());
 }
 
 #[test]

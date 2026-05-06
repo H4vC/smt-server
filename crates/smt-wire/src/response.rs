@@ -48,6 +48,13 @@ impl ResponseEnvelope {
         })?;
         let flags = le::read_u8(bytes, 9, "response flags")?;
         validate_response_flags(flags)?;
+        let reserved = le::read_u16(bytes, 14, "response reserved")?;
+        if reserved != 0 {
+            return Err(WireError::invalid(
+                "response reserved",
+                format!("expected 0, got {reserved}"),
+            ));
+        }
         Ok(Self {
             request_id: le::read_u32(bytes, 4, "response request_id")?,
             status,
@@ -138,15 +145,94 @@ impl BinaryResponse {
                 actual: self.payload.len(),
             });
         }
-        if self.envelope.status == Status::Error {
-            if (self.envelope.flags & response_flags::HAS_MESSAGE) == 0 {
-                return Err(WireError::invalid(
-                    "error response",
-                    "HAS_MESSAGE flag must be set",
-                ));
+        match self.envelope.status {
+            Status::Error => {
+                if self.envelope.flags != response_flags::HAS_MESSAGE {
+                    return Err(WireError::invalid(
+                        "error response",
+                        "ERROR status must use exactly HAS_MESSAGE",
+                    ));
+                }
+                core::str::from_utf8(&self.payload)
+                    .map_err(|_| WireError::invalid("error response", "message is not UTF-8"))?;
             }
-            core::str::from_utf8(&self.payload)
-                .map_err(|_| WireError::invalid("error response", "message is not UTF-8"))?;
+            Status::Unknown => match self.envelope.flags {
+                0 => {
+                    if !self.payload.is_empty() {
+                        return Err(WireError::invalid(
+                            "unknown response",
+                            "payload requires HAS_MESSAGE",
+                        ));
+                    }
+                }
+                response_flags::HAS_MESSAGE => {
+                    core::str::from_utf8(&self.payload).map_err(|_| {
+                        WireError::invalid("unknown response", "message is not UTF-8")
+                    })?;
+                }
+                _ => {
+                    return Err(WireError::invalid(
+                        "unknown response",
+                        "UNKNOWN status may only use HAS_MESSAGE",
+                    ))
+                }
+            },
+            Status::Sat => {
+                let allowed = response_flags::HAS_MODEL | response_flags::HAS_VALUE;
+                if (self.envelope.flags & !allowed) != 0 {
+                    return Err(WireError::invalid(
+                        "sat response",
+                        "SAT status may only use HAS_MODEL/HAS_VALUE",
+                    ));
+                }
+                match (
+                    (self.envelope.flags & response_flags::HAS_VALUE) != 0,
+                    (self.envelope.flags & response_flags::HAS_MODEL) != 0,
+                ) {
+                    (false, false) => {
+                        if !self.payload.is_empty() {
+                            return Err(WireError::invalid(
+                                "sat response",
+                                "payload without flags",
+                            ));
+                        }
+                    }
+                    (false, true) => {
+                        ModelBlock::decode(&self.payload)?;
+                    }
+                    (true, has_model) => {
+                        OptimizationValueBlock::decode(&self.payload, has_model)?;
+                    }
+                }
+            }
+            Status::Unsat => match self.envelope.flags {
+                0 => {
+                    if !self.payload.is_empty() {
+                        return Err(WireError::invalid(
+                            "unsat response",
+                            "payload without HAS_CORE",
+                        ));
+                    }
+                }
+                response_flags::HAS_CORE => {
+                    UnsatCoreBlock::decode(&self.payload)?;
+                }
+                _ => {
+                    return Err(WireError::invalid(
+                        "unsat response",
+                        "UNSAT status may only use HAS_CORE",
+                    ))
+                }
+            },
+            Status::Ok => {
+                if self.envelope.flags != response_flags::HAS_EXPR {
+                    return Err(WireError::invalid(
+                        "ok response",
+                        "OK status must use exactly HAS_EXPR",
+                    ));
+                }
+                SimplifyBlock::decode(&self.payload)?;
+            }
         }
         Ok(())
     }

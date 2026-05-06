@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use smt_server::{dispatch_payload_with_cache, Backend, PooledBackend, QueryResult, ResponseCache};
-use smt_wire::{BinaryRequest, BinaryResponse, ExprBuilder};
+use smt_wire::{request_flags, BinaryRequest, BinaryResponse, ExprBuilder, ModelBlock};
 
 struct CountingBackend {
     count: Arc<AtomicUsize>,
@@ -13,9 +13,11 @@ impl Backend for CountingBackend {
         "counting"
     }
 
-    fn handle(&self, _request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+    fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         self.count.fetch_add(1, Ordering::SeqCst);
-        Ok(QueryResult::sat(None))
+        let model = ((request.envelope.flags & request_flags::WANT_MODEL) != 0)
+            .then(|| ModelBlock { entries: vec![] });
+        Ok(QueryResult::sat(model))
     }
 }
 
@@ -66,6 +68,16 @@ fn cache_key_keeps_fields_that_affect_payload() {
 
     assert_eq!(count.load(Ordering::SeqCst), 2);
     assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn cache_respects_entry_limit() {
+    let cache = ResponseCache::with_limits(1, 1024, 1024);
+    cache.insert(vec![1], vec![10]);
+    cache.insert(vec![2], vec![20]);
+    assert_eq!(cache.len(), 1);
+    assert!(cache.get(&[1]).is_none());
+    assert_eq!(cache.get(&[2]), Some(vec![20]));
 }
 
 #[test]

@@ -1,0 +1,10 @@
+; EXPECT: unsat
+(set-logic QF_BV)
+(declare-fun n () (_ BitVec 32))
+(declare-fun n_prime () (_ BitVec 32))
+(declare-fun d () (_ BitVec 32))
+(declare-fun m () (_ BitVec 32))
+(assert (= n_prime m))
+(assert (or (= (bvurem n d) m) (= m d)))
+(assert (not (or (= (bvurem n_prime d) m) (= m d))))
+(check-sat)

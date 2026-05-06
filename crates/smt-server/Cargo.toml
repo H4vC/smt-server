@@ -6,7 +6,7 @@ description = "Reference SMT wire-format server and backends"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-binbit = { git = "https://github.com/bint-disasm/binbit" }
+binbit = { git = "https://github.com/bint-disasm/binbit", rev = "b4996145c06f39ce5bbc79a959975d7d20b6cf5e" }
 dashu = { version = "0.4.2", features = ["num-traits"] }
 qfbvsmtrs = { path = "../qfbvsmtrs", features = ["wire"] }
 smt-wire = { path = "../smt-wire" }

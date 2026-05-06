@@ -21,7 +21,13 @@ For this solver, a practical production-complete claim means the supported QF_BV
 - remaining corpus `unknown`/timeout cases are either solved or explicitly accepted as outside the production guarantee;
 - `smt-server` integration handles `sat`, `unsat`, `unknown`, timeout, model, core, and optimization paths correctly while `qfbvsmtrs` remains standalone.
 
-Current status: sound controlled backend, not production-complete for arbitrary QF_BV corpus workloads because the merged SMT-LIB corpus tail is still `7,175` `unknown` plus `16` timeouts.
+Current status: sound controlled backend, not production-complete for arbitrary QF_BV corpus workloads because the merged SMT-LIB corpus tail is still `3,622` `unknown` plus `15` timeouts.
+
+## `smt-server` production hardening status
+
+Recent integration hardening added bounded TCP frame/response sizes, bounded active connections, bounded cache entries/key sizes/response sizes, client-side response-size limits, stricter response/request validation, unknown-reason propagation, racing budget bounds (including a 30s default budget in the shipped racing server binary for requests that omit one), pinned the git `binbit` dependency by revision, and enforces that conclusive backend answers include requested model/core/optimization artifacts on binary, text, and standalone SMT-LIB formatting paths. Budgeted `smt-server` calls to `QfbvsmtrsBackend` use qfbvsmtrs' polling DPLL SAT backend to avoid in-process SPLR timeout overruns; unbudgeted standalone/default qfbvsmtrs still uses SPLR. The server text path now falls back to qfbvsmtrs' standalone SMT-LIB parser/solver for `qfbvsmtrs` and shipped `racing` backends when the legacy wire-building frontend rejects a QF_BV script, with a bounded 30s default budget overrideable via `SMT_SERVER_TEXT_QFBVSMTRS_BUDGET_MS`. The standalone CLI now exposes explicit `--budget-ms`, `--sat-backend`, and `--max-input-bytes` controls (with matching environment fallbacks) so production callers can bound solve time and input allocation. The SMT-LIB compatibility frontends now accept common QF_BV forms such as `set-info`, decimal indexed literals `(_ bvN W)`, `distinct`, n-ary `=`, and non-recursive `define-fun` macros, while malformed indexed operators/annotations are rejected without panics.
+
+Remaining service-level production work includes stronger backend cancellation for racing loser threads and continued corpus triage for the qfbvsmtrs text fallback/parser path on very large SMT-LIB inputs.
 
 ## Required local gates
 
@@ -42,7 +48,7 @@ cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
 ```
 
-The checked-in default suite includes exhaustive 4-bit circuit tests, randomized 16/32/64-bit circuit properties, Tseitin truth-table tests across all SAT backends, known-answer SMT-LIB fixtures, Z3 differential smoke tests through the Rust `z3` crate, standalone solver tests, and server integration tests.
+The checked-in default suite includes exhaustive 4-bit circuit tests, randomized 16/32/64-bit circuit properties, Tseitin truth-table tests across all SAT backends, known-answer SMT-LIB fixtures, Z3 differential smoke tests through the Rust `z3` crate, standalone solver tests, total-deadline regression tests for optimization, and server integration tests. In the latest snapshot, the 10k random-circuit extended gate and `QFBVSMTRS_DIFF_RANDOM=1` random Z3 differential gate also passed; a long `cargo fuzz` campaign is still outstanding because `cargo-fuzz` is not installed in the current environment.
 
 See also:
 
@@ -50,4 +56,4 @@ See also:
 - `docs/qfbvsmtrs-design-report.md` for the solver architecture and design details.
 - `docs/qfbvsmtrs-corpus-results.md` for SMT-LIB QF_BV corpus command history.
 
-The corpus runs found no wrong conclusive answers. Latest merged targeted status is 39,000 conclusive matches, 7,175 `unknown`, and 16 timeouts. The remaining tail is primarily hard SAT/preprocessing work: `Sage2`, `asp`, `spear`, `20210219-Sydr`, `uclid`, generated arithmetic/float-style cases, and BMC transition-system timeouts.
+The corpus runs found no wrong conclusive answers. Latest merged targeted status is 42,554 conclusive matches, 3,622 `unknown`, and 15 timeouts after the `bvurem` fixed-point, Favaro MBA, Yurichev popcount, budgeted current-solver tail rerun, 10s/30s/60s/120s sweeps for `Sage2`, `spear`, `asp`, `20210219-Sydr`, `uclid`, `float`, `mcm`, and `brummayerbiere3`, bounded `varisat` sweeps for `Sage2`, `20210312-Bouvier`, `asp`, `spear`, `float`, `mcm`, `20230221-oisc-gurtner`, `uclid`, `20221214-p4dfa-XiaoqiChen`, BMC/Mann, Brummayer arithmetic families, and small families, plus a small-tail 10s sweep. The remaining tail is primarily hard SAT/preprocessing work: `Sage2`, `asp`, `mcm`, `20230221-oisc-gurtner`, generated arithmetic/float-style cases, and BMC transition-system timeouts.

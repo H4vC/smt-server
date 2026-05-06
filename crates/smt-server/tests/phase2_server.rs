@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::thread;
 
 use smt_server::{
-    handle_binary_frame, serve_tcp, BinbitBackend, QfbvsmtrsBackend, ServerConfig, Z3Backend,
+    handle_binary_frame, serve_tcp, Backend, BinbitBackend, QfbvsmtrsBackend, QueryResult,
+    ServerConfig, Z3Backend,
 };
 use smt_wire::{
     le, response_flags, status, BinaryResponse, ExprBuilder, ModelBlock, NodeRef, Status,
@@ -110,6 +111,23 @@ fn qfbvsmtrs_backend_solves_sat_with_model() {
 }
 
 #[test]
+fn qfbvsmtrs_backend_solves_budgeted_request_with_bounded_backend() {
+    let mut builder = ExprBuilder::new();
+    let x = builder.bv_var("x", 4).unwrap();
+    let one = builder.bv_const(1, 4).unwrap();
+    let eq = builder.bv_eq(x, one).unwrap();
+    builder.assert(eq).unwrap();
+    let request = builder.build_solve_request(18, 1000, false, false).unwrap();
+
+    let response = handle_binary_frame(&request, &QfbvsmtrsBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Sat);
+}
+
+#[test]
 fn qfbvsmtrs_backend_solves_unsat_with_named_core() {
     let mut builder = ExprBuilder::new();
     let p = builder.bool_var("p").unwrap();
@@ -147,6 +165,65 @@ fn qfbvsmtrs_backend_solves_unsat() {
         .unwrap();
     let response = BinaryResponse::parse(&response).unwrap();
     assert_eq!(response.envelope.status, Status::Unsat);
+}
+
+struct MissingModelBackend;
+
+impl Backend for MissingModelBackend {
+    fn name(&self) -> &'static str {
+        "missing-model-test"
+    }
+
+    fn handle(&self, _request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult> {
+        Ok(QueryResult::sat(None))
+    }
+}
+
+struct UnknownMessageBackend;
+
+impl Backend for UnknownMessageBackend {
+    fn name(&self) -> &'static str {
+        "unknown-message-test"
+    }
+
+    fn handle(&self, _request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult> {
+        Ok(QueryResult::unknown("deadline elapsed"))
+    }
+}
+
+#[test]
+fn protocol_preserves_unknown_message() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request = builder.build_solve_request(98, 0, false, false).unwrap();
+
+    let response = handle_binary_frame(&request, &UnknownMessageBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Unknown);
+    assert_eq!(response.envelope.flags, response_flags::HAS_MESSAGE);
+    assert_eq!(
+        std::str::from_utf8(&response.payload).unwrap(),
+        "deadline elapsed"
+    );
+}
+
+#[test]
+fn protocol_rejects_sat_without_requested_model() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request = builder.build_solve_request(99, 0, true, false).unwrap();
+
+    let response = handle_binary_frame(&request, &MissingModelBackend)
+        .unwrap()
+        .encode()
+        .unwrap();
+    let response = BinaryResponse::parse(&response).unwrap();
+    assert_eq!(response.envelope.status, Status::Error);
 }
 
 #[test]
@@ -187,6 +264,82 @@ fn tcp_server_handles_one_binary_frame() {
     let response = BinaryResponse::parse(&payload).unwrap();
     assert_eq!(response.envelope.request_id, 14);
     assert_eq!(response.envelope.status as u8, status::SAT);
+    drop(stream);
+    drop(handle);
+}
+
+#[test]
+fn tcp_server_rejects_oversized_frame_before_allocation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let handle = thread::spawn(move || {
+        let mut config = ServerConfig::new(Arc::new(BinbitBackend));
+        config.max_frame_bytes = 8;
+        let _ = serve_tcp(addr, config);
+    });
+
+    let mut stream = None;
+    for _ in 0..100 {
+        match std::net::TcpStream::connect(addr) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    let mut stream = stream.unwrap();
+    stream.write_all(&1024u32.to_le_bytes()).unwrap();
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).unwrap();
+    let len = u32::from_le_bytes(len) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).unwrap();
+    let response = BinaryResponse::parse(&payload).unwrap();
+    assert_eq!(response.envelope.status, Status::Error);
+    drop(stream);
+    drop(handle);
+}
+
+#[test]
+fn tcp_server_replaces_oversized_response_with_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let handle = thread::spawn(move || {
+        let mut config = ServerConfig::new(Arc::new(BinbitBackend));
+        config.max_response_bytes = 15;
+        let _ = serve_tcp(addr, config);
+    });
+
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request = builder.build_solve_request(123, 0, false, false).unwrap();
+    let frame = le::encode_transport_frame(&request).unwrap();
+
+    let mut stream = None;
+    for _ in 0..100 {
+        match std::net::TcpStream::connect(addr) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    let mut stream = stream.unwrap();
+    stream.write_all(&frame).unwrap();
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).unwrap();
+    let len = u32::from_le_bytes(len) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).unwrap();
+    let response = BinaryResponse::parse(&payload).unwrap();
+    assert_eq!(response.envelope.status, Status::Error);
     drop(stream);
     drop(handle);
 }

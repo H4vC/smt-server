@@ -114,7 +114,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "binbit"
 version = "0.1.0"
-source = "git+https://github.com/bint-disasm/binbit#b4996145c06f39ce5bbc79a959975d7d20b6cf5e"
+source = "git+https://github.com/bint-disasm/binbit?rev=b4996145c06f39ce5bbc79a959975d7d20b6cf5e#b4996145c06f39ce5bbc79a959975d7d20b6cf5e"
 dependencies = [
  "mimalloc",
  "rustc-hash 2.1.2",

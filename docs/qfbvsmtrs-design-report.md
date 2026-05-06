@@ -291,13 +291,13 @@ The validation strategy combines several layers:
 7. **Fuzz harness** for parser-to-solver pipeline robustness.
 8. **Full SMT-LIB corpus runner** for broad conformance/performance triage.
 
-The current strongest evidence is: zero parser/backend errors and zero wrong conclusive answers in the latest merged SMT-LIB corpus reports: `39,000` conclusive matches, `7,175` `unknown`, and `16` process timeouts across `46,191` SMT-LIB 2025 QF_BV files. The main remaining gap is non-conclusive coverage in hard SAT/preprocessing-heavy families.
+The current strongest evidence is: zero parser/backend errors and zero wrong conclusive answers in the latest merged SMT-LIB corpus reports: `42,554` conclusive matches, `3,622` `unknown`, and `15` process timeouts across `46,191` SMT-LIB 2025 QF_BV files. The main remaining gap is non-conclusive coverage in hard SAT/preprocessing-heavy families.
 
 ## Known limitations
 
 - Not production-complete for arbitrary QF_BV corpus workloads yet.
-- Latest merged corpus still has `7,175` `unknown` and `16` timeout results under strict/targeted budgets.
-- The remaining tail is concentrated in `Sage2` (`4,701`), `asp` (`465`), `spear` (`407`), `20210219-Sydr` (`344`), `uclid`/`uclid_contrib` (`233`), `20210312-Bouvier` (`200`), `float` (`191`), and smaller arithmetic/BMC families.
+- Latest merged corpus still has `3,622` `unknown` and `15` timeout results under strict/targeted budgets.
+- The remaining tail is concentrated in `Sage2` (`2,566`), `asp` (`366`), `20230221-oisc-gurtner` (`106`), `mcm` (`103`), `20210219-Sydr` (`91`), `brummayerbiere3` (`50`, within `91` remaining `brummayerbiere*` cases), `float` (`79`), `log-slicing` (`57`), and smaller arithmetic/BMC families.
 - No arrays, floating point, quantifiers, or uninterpreted functions.
 - Full no-budget corpus proof is not done.
 - Full-corpus Z3 differential testing is not done.

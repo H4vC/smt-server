@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smt_server::{
-    handle_text_frame, parse_smtlib_script, request_to_smt2, Backend, BinbitBackend, QueryResult,
-    RacingBackend, Z3Backend,
+    handle_text_frame, parse_smtlib_script, request_to_smt2, Backend, BinbitBackend,
+    QfbvsmtrsBackend, QueryResult, RacingBackend, Z3Backend,
 };
 use smt_wire::{BinaryRequest, ExprBuilder};
 
@@ -30,6 +30,52 @@ fn smtlib_text_frontend_rejects_incremental_commands() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("error"), "{text}");
     assert!(text.contains("push"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_qfbvsmtrs_fallback_supports_push_pop() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 2))
+        (push 1)
+        (assert (= x #b01))
+        (pop 1)
+        (assert (= x #b10))
+        (check-sat)
+        (get-value (x))
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &QfbvsmtrsBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+    assert!(text.contains("((x #b10))"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_racing_backend_uses_qfbvsmtrs_fallback() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 2))
+        (push 1)
+        (assert (= x #b01))
+        (pop 1)
+        (assert (= x #b10))
+        (check-sat)
+        (get-value (x))
+    "#;
+    let racing = RacingBackend::new(vec![Arc::new(BinbitBackend), Arc::new(QfbvsmtrsBackend)]);
+    let output = handle_text_frame(script.as_bytes(), &racing).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+    assert!(text.contains("((x #b10))"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_qfbvsmtrs_fallback_reports_original_and_fallback_errors() {
+    let script = "(set-logic QF_BV) (push bad) (check-sat)";
+    let output = handle_text_frame(script.as_bytes(), &QfbvsmtrsBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("error"), "{text}");
+    assert!(text.contains("qfbvsmtrs fallback"), "{text}");
 }
 
 #[test]
@@ -62,6 +108,91 @@ fn smtlib_text_frontend_named_unsat_core() {
     assert!(text.starts_with("unsat\n"), "{text}");
     assert!(text.contains("p_true"), "{text}");
     assert!(text.contains("p_false"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_handles_set_info_and_decimal_indexed_literals() {
+    let script = r#"
+        (set-info :smt-lib-version 2.6)
+        (set-logic QF_BV)
+        (set-info :status unsat)
+        (assert (= (bvsmod (_ bv0 4) (_ bv10 4)) (_ bv10 4)))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("unsat\n"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_supports_distinct() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 4))
+        (assert (distinct x x))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("unsat\n"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_expands_define_fun_with_arguments() {
+    let script = r#"
+        (set-logic QF_BV)
+        (define-fun same-low ((a (_ BitVec 4)) (b (_ BitVec 4))) Bool
+            (= ((_ extract 1 0) a) ((_ extract 1 0) b)))
+        (assert (not (same-low #b0011 #b1011)))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("unsat\n"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_reports_bad_annotation_without_panic() {
+    let script = r#"
+        (set-logic QF_BV)
+        (assert (! :named a))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("error"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_rejects_malformed_annotation_pairs() {
+    for script in [
+        "(set-logic QF_BV) (assert (! true :named)) (check-sat)",
+        "(set-logic QF_BV) (assert (! true named a)) (check-sat)",
+    ] {
+        let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("error"), "{text}");
+    }
+}
+
+#[test]
+fn smtlib_text_frontend_accepts_non_named_annotations() {
+    let script = "(set-logic QF_BV) (assert (! true :reason ok)) (check-sat)";
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_reports_bad_indexed_op_arity_without_panic() {
+    let script = r#"
+        (set-logic QF_BV)
+        (assert ((_ zero_extend 1) #b0 #b1))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("error"), "{text}");
 }
 
 #[test]
@@ -159,6 +290,20 @@ impl Backend for ImmediateSatBackend {
 }
 
 #[test]
+fn smtlib_text_frontend_does_not_claim_sat_without_requested_model() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 1))
+        (check-sat)
+        (get-model)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &ImmediateSatBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("unknown\n"), "{text}");
+    assert!(text.contains("omitted requested model"), "{text}");
+}
+
+#[test]
 fn racing_backend_waits_past_unknown_for_conclusive_result() {
     let mut builder = ExprBuilder::new();
     let t = builder.bool_true().unwrap();
@@ -184,6 +329,41 @@ fn racing_backend_returns_first_conclusive_without_waiting_for_slow_unknown() {
     let start = Instant::now();
     let result = racing.handle(&request).unwrap();
     assert!(result.is_conclusive());
+    assert!(start.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn racing_backend_default_budget_bounds_unbudgeted_requests() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(6, 0, false, false).unwrap()).unwrap();
+    let racing = RacingBackend::new(vec![
+        Arc::new(SlowUnknownBackend),
+        Arc::new(SlowUnknownBackend),
+    ])
+    .with_default_budget_ms(20);
+    let start = Instant::now();
+    let result = racing.handle(&request).unwrap();
+    assert!(!result.is_conclusive());
+    assert!(start.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn racing_backend_respects_request_budget_while_backends_continue() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(5, 20, false, false).unwrap()).unwrap();
+    let racing = RacingBackend::new(vec![
+        Arc::new(SlowUnknownBackend),
+        Arc::new(SlowUnknownBackend),
+    ]);
+    let start = Instant::now();
+    let result = racing.handle(&request).unwrap();
+    assert!(!result.is_conclusive());
     assert!(start.elapsed() < Duration::from_millis(200));
 }
 

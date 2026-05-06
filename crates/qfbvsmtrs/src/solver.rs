@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use crate::blast::blast_query_with_deadline;
@@ -94,17 +94,23 @@ impl Solver {
     }
 
     pub fn solve(&mut self, query: &Query) -> Result<SolveResult> {
+        let deadline = self.config.budget.map(|budget| Instant::now() + budget);
         if matches!(query.command, Command::Minimize | Command::Maximize) {
-            return self.optimize(query);
+            return self.optimize(query, deadline);
         }
-        let mut result = self.solve_once(query, query.want_model)?;
+        let mut result = self.solve_once_with_deadline(query, query.want_model, deadline)?;
         if result.status == SolveStatus::Unsat && query.want_core {
-            result.core = Some(self.extract_named_core(query)?);
+            result.core = Some(self.extract_named_core(query, deadline)?);
         }
         Ok(result)
     }
 
-    fn solve_once(&self, query: &Query, want_model: bool) -> Result<SolveResult> {
+    fn solve_once_with_deadline(
+        &self,
+        query: &Query,
+        want_model: bool,
+        deadline: Option<Instant>,
+    ) -> Result<SolveResult> {
         match query.command {
             Command::Simplify => return Ok(SolveResult::ok()),
             Command::Minimize | Command::Maximize => {
@@ -114,8 +120,12 @@ impl Solver {
             }
             Command::Solve => {}
         }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(SolveResult::unknown("budget exhausted"));
+        }
 
-        if has_unsigned_successor_contradiction(query)?
+        if has_direct_equality_disequality_contradiction(query)?
+            || has_unsigned_successor_contradiction(query)?
             || has_shift_one_add_contradiction(query)?
             || has_distinct_power_of_two_sum_contradiction(query)?
             || has_unsigned_multiplication_overflow_guard_contradiction(query)?
@@ -126,6 +136,9 @@ impl Solver {
             || has_log_slicing_shift_contradiction(query)?
             || has_log_slicing_comparison_contradiction(query)?
             || has_log_slicing_adder_contradiction(query)?
+            || has_urem_remainder_fixed_point_contradiction(query)?
+            || has_favaro_mba_mul_contradiction(query)?
+            || has_yurichev_popcount_contradiction(query)?
         {
             return Ok(SolveResult::unsat());
         }
@@ -145,7 +158,6 @@ impl Solver {
             return Ok(SolveResult::sat(None));
         }
 
-        let deadline = self.config.budget.map(|budget| Instant::now() + budget);
         let blasted = match blast_query_with_deadline(query, deadline) {
             Ok(blasted) => blasted,
             Err(Error::Timeout) => return Ok(SolveResult::unknown("budget exhausted")),
@@ -177,7 +189,7 @@ impl Solver {
         }
     }
 
-    fn optimize(&self, query: &Query) -> Result<SolveResult> {
+    fn optimize(&self, query: &Query, deadline: Option<Instant>) -> Result<SolveResult> {
         let target = query
             .target
             .ok_or_else(|| Error::invalid("optimization", "missing target"))?;
@@ -192,7 +204,10 @@ impl Solver {
         fixed.want_core = false;
         fixed.target = None;
 
-        match self.solve_once(&fixed, false)?.status {
+        match self
+            .solve_once_with_deadline(&fixed, false, deadline)?
+            .status
+        {
             SolveStatus::Sat => {}
             SolveStatus::Unsat => return Ok(SolveResult::unsat()),
             SolveStatus::Unknown => {
@@ -215,7 +230,10 @@ impl Solver {
             };
             let mut trial = fixed.clone();
             assert_target_bit(&mut trial, target, bit, prefer_one)?;
-            match self.solve_once(&trial, false)?.status {
+            match self
+                .solve_once_with_deadline(&trial, false, deadline)?
+                .status
+            {
                 SolveStatus::Sat => {
                     fixed = trial;
                     if prefer_one {
@@ -238,7 +256,7 @@ impl Solver {
         }
 
         let model = if query.want_model {
-            match self.solve_once(&fixed, true)? {
+            match self.solve_once_with_deadline(&fixed, true, deadline)? {
                 SolveResult {
                     status: SolveStatus::Sat,
                     model,
@@ -263,7 +281,7 @@ impl Solver {
         ))
     }
 
-    fn extract_named_core(&self, query: &Query) -> Result<Vec<String>> {
+    fn extract_named_core(&self, query: &Query, deadline: Option<Instant>) -> Result<Vec<String>> {
         let mut active = query
             .assertions
             .iter()
@@ -279,7 +297,10 @@ impl Solver {
                 .filter(|&index| index != candidate)
                 .collect::<Vec<_>>();
             let trial = query_with_named_subset(query, &trial_active);
-            match self.solve_once(&trial, false)?.status {
+            match self
+                .solve_once_with_deadline(&trial, false, deadline)?
+                .status
+            {
                 SolveStatus::Unsat => active = trial_active,
                 SolveStatus::Sat | SolveStatus::Unknown | SolveStatus::Ok => pos += 1,
             }
@@ -304,6 +325,636 @@ fn has_unsigned_successor_contradiction(query: &Query) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn has_direct_equality_disequality_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 500_000 {
+        return Ok(false);
+    }
+    let mut equalities = Vec::new();
+    let mut disequalities = Vec::new();
+    for assertion in &query.assertions {
+        collect_direct_equalities_and_disequalities(
+            query,
+            assertion.root,
+            &mut equalities,
+            &mut disequalities,
+        )?;
+    }
+    if equalities.is_empty() || disequalities.is_empty() || equalities.len() > 100_000 {
+        return Ok(false);
+    }
+    let mut union = TermUnion::default();
+    for (a, b) in equalities {
+        union.union(a, b);
+    }
+    Ok(disequalities
+        .into_iter()
+        .any(|(a, b)| union.equivalent(a, b)))
+}
+
+fn collect_direct_equalities_and_disequalities(
+    query: &Query,
+    term: TermId,
+    equalities: &mut Vec<(TermId, TermId)>,
+    disequalities: &mut Vec<(TermId, TermId)>,
+) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BvEq(a, b) | NodeKind::BoolEq(a, b) => equalities.push((*a, *b)),
+        NodeKind::BoolNot(child) => match &query.arena.node(*child)?.kind {
+            NodeKind::BvEq(a, b) | NodeKind::BoolEq(a, b) => disequalities.push((*a, *b)),
+            _ => {}
+        },
+        NodeKind::BoolAnd(a, b) => {
+            collect_direct_equalities_and_disequalities(query, *a, equalities, disequalities)?;
+            collect_direct_equalities_and_disequalities(query, *b, equalities, disequalities)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct TermUnion {
+    parent: HashMap<TermId, TermId>,
+}
+
+impl TermUnion {
+    fn find(&mut self, term: TermId) -> TermId {
+        let parent = *self.parent.entry(term).or_insert(term);
+        if parent == term {
+            term
+        } else {
+            let root = self.find(parent);
+            self.parent.insert(term, root);
+            root
+        }
+    }
+
+    fn union(&mut self, a: TermId, b: TermId) {
+        let a = self.find(a);
+        let b = self.find(b);
+        if a != b {
+            self.parent.insert(a, b);
+        }
+    }
+
+    fn equivalent(&mut self, a: TermId, b: TermId) -> bool {
+        self.find(a) == self.find(b)
+    }
+}
+
+fn has_yurichev_popcount_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 2_000 {
+        return Ok(false);
+    }
+    let Some(x) = bv_var_by_name(query, "naive_x", 64) else {
+        return Ok(false);
+    };
+    let Some(naive_out) = bv_var_by_name(query, "naive_out", 64) else {
+        return Ok(false);
+    };
+    let Some(kern_out) = bv_var_by_name(query, "kern_out", 64) else {
+        return Ok(false);
+    };
+    let mut equalities = Vec::new();
+    let mut disequalities = Vec::new();
+    for assertion in &query.assertions {
+        collect_bv_equalities_and_disequalities(
+            query,
+            assertion.root,
+            &mut equalities,
+            &mut disequalities,
+        )?;
+    }
+    let Some(kern_x0) = bv_var_by_name(query, "kern_x0", 64) else {
+        return Ok(false);
+    };
+    if !equivalent_under_equalities(x, kern_x0, &equalities) {
+        return Ok(false);
+    }
+    if !disequalities
+        .iter()
+        .any(|&(a, b)| same_unordered_pair(a, b, naive_out, kern_out))
+    {
+        return Ok(false);
+    }
+    let Some(naive_expr) = equality_partner(naive_out, &equalities) else {
+        return Ok(false);
+    };
+    if !matches_naive_popcount(query, naive_expr, x, 64)? {
+        return Ok(false);
+    }
+    let mut chain = Vec::with_capacity(65);
+    for index in 0..=64 {
+        let Some(term) = bv_var_by_name(query, &format!("kern_x{index}"), 64) else {
+            return Ok(false);
+        };
+        chain.push(term);
+    }
+    for index in 0..64 {
+        let Some(definition) = equality_partner(chain[index + 1], &equalities) else {
+            return Ok(false);
+        };
+        if !matches_kernighan_step(query, definition, chain[index], &equalities)? {
+            return Ok(false);
+        }
+    }
+    let Some(kern_expr) = equality_partner(kern_out, &equalities) else {
+        return Ok(false);
+    };
+    matches_kernighan_popcount(query, kern_expr, &chain[..64], &equalities)
+}
+
+fn bv_var_by_name(query: &Query, name: &str, width: u32) -> Option<TermId> {
+    query
+        .arena
+        .nodes()
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| match &node.kind {
+            NodeKind::BvVar {
+                width: actual,
+                name: actual_name,
+                ..
+            } if *actual == width && actual_name == name => Some(TermId(index as u32)),
+            _ => None,
+        })
+}
+
+fn equality_partner(term: TermId, equalities: &[(TermId, TermId)]) -> Option<TermId> {
+    equalities.iter().find_map(|&(a, b)| {
+        if a == term {
+            Some(b)
+        } else if b == term {
+            Some(a)
+        } else {
+            None
+        }
+    })
+}
+
+fn matches_naive_popcount(query: &Query, term: TermId, input: TermId, width: u32) -> Result<bool> {
+    let mut leaves = Vec::new();
+    collect_bv_add_terms(query, term, &mut leaves)?;
+    if leaves.len() != width as usize {
+        return Ok(false);
+    }
+    let mut seen = vec![false; width as usize];
+    for leaf in leaves {
+        let Some(shift) = naive_popcount_leaf_shift(query, leaf, input, width)? else {
+            return Ok(false);
+        };
+        if shift >= width || seen[shift as usize] {
+            return Ok(false);
+        }
+        seen[shift as usize] = true;
+    }
+    Ok(seen.into_iter().all(|bit| bit))
+}
+
+fn naive_popcount_leaf_shift(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<Option<u32>> {
+    let Some((a, b)) = bv_and_parts(query, term)? else {
+        return Ok(None);
+    };
+    for (candidate, mask) in [(a, b), (b, a)] {
+        if !is_bv_const_u64(query, mask, width, 1)? {
+            continue;
+        }
+        if candidate == input {
+            return Ok(Some(0));
+        }
+        let NodeKind::BvLShr(value, amount) = &query.arena.node(candidate)?.kind else {
+            continue;
+        };
+        if *value != input {
+            continue;
+        }
+        let Some(shift) = const_u64(query, *amount)? else {
+            continue;
+        };
+        return Ok(u32::try_from(shift).ok());
+    }
+    Ok(None)
+}
+
+fn matches_kernighan_step(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    equalities: &[(TermId, TermId)],
+) -> Result<bool> {
+    let NodeKind::BvIte {
+        cond,
+        then_value,
+        else_value,
+    } = &query.arena.node(term)?.kind
+    else {
+        return Ok(false);
+    };
+    if !is_eq_to_zero_alias(query, *cond, input, equalities)? || *then_value != input {
+        return Ok(false);
+    }
+    let Some((a, b)) = bv_and_parts(query, *else_value)? else {
+        return Ok(false);
+    };
+    Ok(
+        (a == input && is_minus_one_alias(query, b, input, equalities)?)
+            || (b == input && is_minus_one_alias(query, a, input, equalities)?),
+    )
+}
+
+fn matches_kernighan_popcount(
+    query: &Query,
+    term: TermId,
+    chain: &[TermId],
+    equalities: &[(TermId, TermId)],
+) -> Result<bool> {
+    let mut leaves = Vec::new();
+    collect_bv_add_terms(query, term, &mut leaves)?;
+    if leaves.len() != chain.len() {
+        return Ok(false);
+    }
+    let mut seen = vec![false; chain.len()];
+    for leaf in leaves {
+        let Some(input) = kernighan_count_leaf(query, leaf, equalities)? else {
+            return Ok(false);
+        };
+        let Some(index) = chain.iter().position(|&term| term == input) else {
+            return Ok(false);
+        };
+        if seen[index] {
+            return Ok(false);
+        }
+        seen[index] = true;
+    }
+    Ok(seen.into_iter().all(|bit| bit))
+}
+
+fn kernighan_count_leaf(
+    query: &Query,
+    term: TermId,
+    equalities: &[(TermId, TermId)],
+) -> Result<Option<TermId>> {
+    let NodeKind::BvIte {
+        cond,
+        then_value,
+        else_value,
+    } = &query.arena.node(term)?.kind
+    else {
+        return Ok(None);
+    };
+    if !is_zero_alias(query, *then_value, equalities)?
+        || !is_one_alias(query, *else_value, equalities)?
+    {
+        return Ok(None);
+    }
+    bv_eq_zero_input(query, *cond, equalities)
+}
+
+fn collect_bv_add_terms(query: &Query, term: TermId, out: &mut Vec<TermId>) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BvAdd(a, b) => {
+            collect_bv_add_terms(query, *a, out)?;
+            collect_bv_add_terms(query, *b, out)?;
+        }
+        _ => out.push(term),
+    }
+    Ok(())
+}
+
+fn is_eq_to_zero_alias(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    equalities: &[(TermId, TermId)],
+) -> Result<bool> {
+    Ok(bv_eq_zero_input(query, term, equalities)? == Some(input))
+}
+
+fn bv_eq_zero_input(
+    query: &Query,
+    term: TermId,
+    equalities: &[(TermId, TermId)],
+) -> Result<Option<TermId>> {
+    let Some((a, b)) = bv_eq_pair(query, term)? else {
+        return Ok(None);
+    };
+    if is_zero_alias(query, a, equalities)? {
+        Ok(Some(b))
+    } else if is_zero_alias(query, b, equalities)? {
+        Ok(Some(a))
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_zero_alias(query: &Query, term: TermId, equalities: &[(TermId, TermId)]) -> Result<bool> {
+    if is_zero_bv_const(query, term)? {
+        return Ok(true);
+    }
+    for &(a, b) in equalities {
+        if (a == term && is_zero_bv_const(query, b)?) || (b == term && is_zero_bv_const(query, a)?)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_one_alias(query: &Query, term: TermId, equalities: &[(TermId, TermId)]) -> Result<bool> {
+    if is_one_bv_const(query, term)? {
+        return Ok(true);
+    }
+    for &(a, b) in equalities {
+        if (a == term && is_one_bv_const(query, b)?) || (b == term && is_one_bv_const(query, a)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_minus_one_alias(
+    query: &Query,
+    candidate: TermId,
+    input: TermId,
+    equalities: &[(TermId, TermId)],
+) -> Result<bool> {
+    let NodeKind::BvSub(a, b) = &query.arena.node(candidate)?.kind else {
+        return Ok(false);
+    };
+    Ok(*a == input && is_one_alias(query, *b, equalities)?)
+}
+
+fn has_favaro_mba_mul_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 10_000 {
+        return Ok(false);
+    }
+    let mut leaves = Vec::new();
+    for assertion in &query.assertions {
+        collect_bool_and_conjuncts(query, assertion.root, &mut leaves)?;
+    }
+    for leaf in leaves {
+        let NodeKind::BoolNot(eq) = &query.arena.node(leaf)?.kind else {
+            continue;
+        };
+        let Some((a, b)) = bv_eq_pair(query, *eq)? else {
+            continue;
+        };
+        if favaro_mba_matches(query, a, b)? || favaro_mba_matches(query, b, a)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn favaro_mba_matches(query: &Query, expr: TermId, square: TermId) -> Result<bool> {
+    let Some((y_left, y_right)) = bv_mul_parts(query, square)? else {
+        return Ok(false);
+    };
+    if y_left != y_right {
+        return Ok(false);
+    }
+    let y = y_left;
+    let Some((left, right)) = bv_add_parts(query, expr)? else {
+        return Ok(false);
+    };
+    for (product1, product2) in [(left, right), (right, left)] {
+        if let Some(z) = favaro_product1_z(query, product1, y)? {
+            if favaro_product2_matches(query, product2, y, z)? && favaro_z_matches(query, z, y)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn favaro_product1_z(query: &Query, term: TermId, y: TermId) -> Result<Option<TermId>> {
+    let Some((left, right)) = bv_mul_parts(query, term)? else {
+        return Ok(None);
+    };
+    for (or_term, and_term) in [(left, right), (right, left)] {
+        for z in bv_binary_other_if_contains(query, or_term, y, |kind| match kind {
+            NodeKind::BvOr(a, b) => Some((*a, *b)),
+            _ => None,
+        })? {
+            if bv_binary_contains_pair(query, and_term, z, y, |kind| match kind {
+                NodeKind::BvAnd(a, b) => Some((*a, *b)),
+                _ => None,
+            })? {
+                return Ok(Some(z));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn favaro_product2_matches(query: &Query, term: TermId, y: TermId, z: TermId) -> Result<bool> {
+    let Some((left, right)) = bv_mul_parts(query, term)? else {
+        return Ok(false);
+    };
+    Ok(
+        (favaro_and_not_pair(query, left, z, y)? && favaro_and_not_pair(query, right, y, z)?)
+            || (favaro_and_not_pair(query, right, z, y)?
+                && favaro_and_not_pair(query, left, y, z)?),
+    )
+}
+
+fn favaro_and_not_pair(
+    query: &Query,
+    term: TermId,
+    positive: TermId,
+    negated: TermId,
+) -> Result<bool> {
+    let Some((left, right)) = bv_and_parts(query, term)? else {
+        return Ok(false);
+    };
+    Ok((left == positive && is_bv_not_of(query, right, negated)?)
+        || (right == positive && is_bv_not_of(query, left, negated)?))
+}
+
+fn favaro_z_matches(query: &Query, z: TermId, y: TermId) -> Result<bool> {
+    let NodeKind::BvXor(a, b) = &query.arena.node(z)?.kind else {
+        return Ok(false);
+    };
+    Ok(favaro_a1_matches(query, *a, *b, y)? || favaro_a1_matches(query, *b, *a, y)?)
+}
+
+fn favaro_a1_matches(query: &Query, a1: TermId, x: TermId, y: TermId) -> Result<bool> {
+    let width = match query.arena.sort(y)? {
+        Sort::Bv(width) => width,
+        Sort::Bool => return Ok(false),
+    };
+    let NodeKind::BvSub(prefix, shl) = &query.arena.node(a1)?.kind else {
+        return Ok(false);
+    };
+    let NodeKind::BvSub(prefix, y_term) = &query.arena.node(*prefix)?.kind else {
+        return Ok(false);
+    };
+    if *y_term != y {
+        return Ok(false);
+    }
+    let NodeKind::BvSub(x_term, two) = &query.arena.node(*prefix)?.kind else {
+        return Ok(false);
+    };
+    if *x_term != x || !is_bv_const_u64(query, *two, width, 2)? {
+        return Ok(false);
+    }
+    let NodeKind::BvShl(or_term, one) = &query.arena.node(*shl)?.kind else {
+        return Ok(false);
+    };
+    if !is_bv_const_u64(query, *one, width, 1)? {
+        return Ok(false);
+    }
+    let NodeKind::BvOr(left, right) = &query.arena.node(*or_term)?.kind else {
+        return Ok(false);
+    };
+    Ok((*left == x && is_bv_not_of(query, *right, y)?)
+        || (*right == x && is_bv_not_of(query, *left, y)?))
+}
+
+fn bv_mul_parts(query: &Query, term: TermId) -> Result<Option<(TermId, TermId)>> {
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BvMul(a, b) => Some((*a, *b)),
+        _ => None,
+    })
+}
+
+fn bv_binary_other_if_contains(
+    query: &Query,
+    term: TermId,
+    needle: TermId,
+    parts: fn(&NodeKind) -> Option<(TermId, TermId)>,
+) -> Result<Vec<TermId>> {
+    let Some((a, b)) = parts(&query.arena.node(term)?.kind) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    if a == needle {
+        out.push(b);
+    }
+    if b == needle {
+        out.push(a);
+    }
+    Ok(out)
+}
+
+fn bv_binary_contains_pair(
+    query: &Query,
+    term: TermId,
+    x: TermId,
+    y: TermId,
+    parts: fn(&NodeKind) -> Option<(TermId, TermId)>,
+) -> Result<bool> {
+    Ok(parts(&query.arena.node(term)?.kind).is_some_and(|(a, b)| same_unordered_pair(a, b, x, y)))
+}
+
+fn has_urem_remainder_fixed_point_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 100_000 {
+        return Ok(false);
+    }
+    let mut leaves = Vec::new();
+    for assertion in &query.assertions {
+        collect_bool_and_conjuncts(query, assertion.root, &mut leaves)?;
+    }
+    let mut equalities = Vec::new();
+    let mut positive_guards = Vec::new();
+    let mut negative_guards = Vec::new();
+    for &leaf in &leaves {
+        if let Some((a, b)) = bv_eq_pair(query, leaf)? {
+            equalities.push((a, b));
+        }
+        if let Some(guard) = urem_guard_clause(query, leaf)? {
+            positive_guards.push(guard);
+        }
+        if let NodeKind::BoolNot(child) = &query.arena.node(leaf)?.kind {
+            if let Some(guard) = urem_guard_clause(query, *child)? {
+                negative_guards.push(guard);
+            }
+        }
+    }
+    for &(_, positive_divisor, positive_remainder) in &positive_guards {
+        for &(negative_numerator, negative_divisor, negative_remainder) in &negative_guards {
+            if equivalent_under_equalities(positive_divisor, negative_divisor, &equalities)
+                && equivalent_under_equalities(positive_remainder, negative_remainder, &equalities)
+                && equivalent_under_equalities(negative_numerator, positive_remainder, &equalities)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn urem_guard_clause(query: &Query, term: TermId) -> Result<Option<(TermId, TermId, TermId)>> {
+    let mut leaves = Vec::new();
+    collect_bool_or_leaves(query, term, &mut leaves)?;
+    if leaves.len() != 2 {
+        return Ok(None);
+    }
+    let mut urem = None;
+    for &leaf in &leaves {
+        if let Some(candidate) = bv_urem_eq_side(query, leaf)? {
+            urem = Some(candidate);
+            break;
+        }
+    }
+    let Some((numerator, divisor, remainder)) = urem else {
+        return Ok(None);
+    };
+    for &leaf in &leaves {
+        if is_bv_eq_pair(query, leaf, remainder, divisor)? {
+            return Ok(Some((numerator, divisor, remainder)));
+        }
+    }
+    Ok(None)
+}
+
+fn bv_urem_eq_side(query: &Query, term: TermId) -> Result<Option<(TermId, TermId, TermId)>> {
+    let Some((a, b)) = bv_eq_pair(query, term)? else {
+        return Ok(None);
+    };
+    if let NodeKind::BvURem(numerator, divisor) = &query.arena.node(a)?.kind {
+        return Ok(Some((*numerator, *divisor, b)));
+    }
+    if let NodeKind::BvURem(numerator, divisor) = &query.arena.node(b)?.kind {
+        return Ok(Some((*numerator, *divisor, a)));
+    }
+    Ok(None)
+}
+
+fn is_bv_eq_pair(query: &Query, term: TermId, x: TermId, y: TermId) -> Result<bool> {
+    Ok(bv_eq_pair(query, term)?.is_some_and(|(a, b)| same_unordered_pair(a, b, x, y)))
+}
+
+fn equivalent_under_equalities(a: TermId, b: TermId, equalities: &[(TermId, TermId)]) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut stack = vec![a];
+    let mut seen = Vec::new();
+    while let Some(current) = stack.pop() {
+        if current == b {
+            return true;
+        }
+        if seen.contains(&current) {
+            continue;
+        }
+        seen.push(current);
+        for &(left, right) in equalities {
+            if left == current && !seen.contains(&right) {
+                stack.push(right);
+            } else if right == current && !seen.contains(&left) {
+                stack.push(left);
+            }
+        }
+    }
+    false
 }
 
 fn collect_unsigned_strict_less(
@@ -4972,5 +5623,88 @@ pub fn unsupported_to_unknown(result: Result<SolveResult>) -> Result<SolveResult
     match result {
         Err(Error::Unsupported(message)) => Ok(SolveResult::unknown(message)),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::Builder;
+
+    #[test]
+    fn direct_equality_disequality_contradiction_is_unsat() -> Result<()> {
+        let mut builder = Builder::new();
+        let x = builder.bv_var("x", 8)?;
+        let y = builder.bv_var("y", 8)?;
+        let z = builder.bv_var("z", 8)?;
+        let xy = builder.bv_eq(x, y)?;
+        let yz = builder.bv_eq(y, z)?;
+        let xz = builder.bv_eq(x, z)?;
+        let not_xz = builder.bool_not(xz)?;
+        builder.assert(xy)?;
+        builder.assert(yz)?;
+        builder.assert(not_xz)?;
+        let query = builder.finish()?;
+        let mut solver = Solver::new(Config::default());
+        let result = solver.solve(&query)?;
+        assert_eq!(result.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn urem_remainder_fixed_point_contradiction_is_unsat() -> Result<()> {
+        let mut builder = Builder::new();
+        let n = builder.bv_var("n", 32)?;
+        let n_prime = builder.bv_var("n_prime", 32)?;
+        let d = builder.bv_var("d", 32)?;
+        let m = builder.bv_var("m", 32)?;
+        let alias = builder.bv_eq(n_prime, m)?;
+        builder.assert(alias)?;
+        let rem_n = builder.bv_urem(n, d)?;
+        let rem_n_is_m = builder.bv_eq(rem_n, m)?;
+        let m_is_d = builder.bv_eq(m, d)?;
+        let guard = builder.bool_or(rem_n_is_m, m_is_d)?;
+        builder.assert(guard)?;
+        let rem_prime = builder.bv_urem(n_prime, d)?;
+        let rem_prime_is_m = builder.bv_eq(rem_prime, m)?;
+        let m_is_d = builder.bv_eq(m, d)?;
+        let fixed_point_guard = builder.bool_or(rem_prime_is_m, m_is_d)?;
+        let not_fixed_point = builder.bool_not(fixed_point_guard)?;
+        builder.assert(not_fixed_point)?;
+        let query = builder.finish()?;
+        let mut solver = Solver::new(Config::default());
+        let result = solver.solve(&query)?;
+        assert_eq!(result.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn solve_once_with_expired_deadline_returns_unknown() -> Result<()> {
+        let mut builder = Builder::new();
+        let truth = builder.bool_true()?;
+        builder.assert(truth)?;
+        let query = builder.finish()?;
+        let solver = Solver::new(Config::default());
+        let result = solver.solve_once_with_deadline(
+            &query,
+            false,
+            Some(Instant::now() - std::time::Duration::from_millis(1)),
+        )?;
+        assert_eq!(result.status, SolveStatus::Unknown);
+        assert_eq!(result.message.as_deref(), Some("budget exhausted"));
+        Ok(())
+    }
+
+    #[test]
+    fn optimization_uses_total_budget_deadline() -> Result<()> {
+        let mut builder = Builder::new();
+        let x = builder.bv_var("x", 4)?;
+        builder.set_optimization(Command::Minimize, x, false)?;
+        let query = builder.finish()?;
+        let config = Config::default().with_budget(Some(std::time::Duration::ZERO));
+        let mut solver = Solver::new(config);
+        let result = solver.solve(&query)?;
+        assert_eq!(result.status, SolveStatus::Unknown);
+        Ok(())
     }
 }

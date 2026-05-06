@@ -1,7 +1,8 @@
 use smt_wire::{
-    request_flags, response_flags, status, tag, BinaryRequest, BinaryResponse, BlobRef, Command,
-    ExprBuilder, ExprView, ExpressionBuffer, ModelBlock, ModelEntry, NodeRef,
-    OptimizationValueBlock, RawNode, ScalarValue, SimplifyBlock, Sort, Status, UnsatCoreBlock,
+    request_flags, response_flags, status, tag, BinaryRequest, BinaryResponse, BlobRef,
+    ClientError, Command, ExprBuilder, ExprView, ExpressionBuffer, ModelBlock, ModelEntry, NodeRef,
+    OptimizationValueBlock, RawNode, ScalarValue, SimplifyBlock, Sort, Status, TcpClient,
+    UnsatCoreBlock,
 };
 
 fn hex_bytes(input: &str) -> Vec<u8> {
@@ -250,6 +251,74 @@ fn malformed_inputs_are_rejected() {
     let mut truncated_response = BinaryResponse::error(1, "bad").unwrap().encode().unwrap();
     truncated_response.pop();
     assert!(BinaryResponse::parse(&truncated_response).is_err());
+
+    let mut reserved_response = BinaryResponse::new(1, Status::Sat, 0, vec![])
+        .unwrap()
+        .encode()
+        .unwrap();
+    reserved_response[14] = 1;
+    assert!(BinaryResponse::parse(&reserved_response).is_err());
+}
+
+#[test]
+fn request_validation_rejects_command_specific_flags() {
+    let mut parse_builder = ExprBuilder::new();
+    let truth = parse_builder.bool_true().unwrap();
+    parse_builder.assert(truth).unwrap();
+    let solve = parse_builder
+        .build_solve_request(9, 0, false, false)
+        .unwrap();
+    let mut malformed_solve = solve.clone();
+    malformed_solve[9] |= request_flags::SIGNED;
+    assert!(BinaryRequest::parse(&malformed_solve).is_err());
+    let mut solve_with_target = solve.clone();
+    solve_with_target[24..28].copy_from_slice(&1u32.to_le_bytes());
+    assert!(BinaryRequest::parse(&solve_with_target).is_err());
+    let mut solve_with_reserved = solve;
+    solve_with_reserved[28..32].copy_from_slice(&1u32.to_le_bytes());
+    assert!(BinaryRequest::parse(&solve_with_reserved).is_err());
+
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    let x = builder.bv_var("x", 4).unwrap();
+    let expression = builder.to_bytes().unwrap();
+
+    assert!(BinaryRequest::new(
+        1,
+        Command::Solve,
+        request_flags::SIGNED,
+        0,
+        expression.clone(),
+        vec![t],
+        vec![],
+        vec![],
+        None,
+    )
+    .is_err());
+    assert!(BinaryRequest::new(
+        2,
+        Command::Simplify,
+        request_flags::WANT_MODEL,
+        0,
+        expression.clone(),
+        vec![t],
+        vec![],
+        vec![],
+        None,
+    )
+    .is_err());
+    assert!(BinaryRequest::new(
+        3,
+        Command::Minimize,
+        request_flags::WANT_CORE,
+        0,
+        expression,
+        vec![t],
+        vec![],
+        vec![],
+        Some(x),
+    )
+    .is_err());
 }
 
 #[test]
@@ -294,4 +363,29 @@ fn transport_frames_are_little_endian_and_exact_length() {
 
     assert_eq!(status::SAT, 1);
     assert_eq!(Sort::Bool.sort_bit(), 0x8000_0000);
+}
+
+#[test]
+fn tcp_client_rejects_oversized_response_frame_before_allocation() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).unwrap();
+        let len = u32::from_le_bytes(len) as usize;
+        let mut payload = vec![0u8; len];
+        stream.read_exact(&mut payload).unwrap();
+        stream.write_all(&1024u32.to_le_bytes()).unwrap();
+    });
+
+    let mut client = TcpClient::connect(addr).unwrap();
+    client.set_max_response_bytes(8);
+    let err = client.send_payload(b"ping").unwrap_err();
+    assert!(matches!(err, ClientError::FrameTooLarge(1024)));
+    handle.join().unwrap();
 }

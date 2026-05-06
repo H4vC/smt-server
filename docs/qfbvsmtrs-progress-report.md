@@ -1,6 +1,6 @@
 # qfbvsmtrs progress report
 
-Date: 2026-05-05
+Date: 2026-05-06
 
 `qfbvsmtrs` is now implemented as a standalone pure-Rust QF_BV solver crate and is integrated into `smt-server` as a third backend. The solver is functional, broadly tested, and has produced no wrong conclusive answers on the SMT-LIB 2025 QF_BV corpus runs performed so far. It is **not yet production-complete for arbitrary QF_BV workloads** because a large tail of corpus cases still returns `unknown` or hits timeout under strict budgets.
 
@@ -34,13 +34,22 @@ Checked-in validation includes:
 - `smt-server` integration tests for qfbvsmtrs SAT, UNSAT, model, core, and optimization paths;
 - fuzz harness compile check.
 
-Recent full workspace gates after the latest solver changes passed:
+Recent full workspace gates after the latest solver/server changes passed:
 
 ```sh
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
+python clients/tests/test_python_client.py
+python clients/tests/test_live_server.py
+```
+
+Extended randomized validation also passed in this snapshot:
+
+```sh
+QFBVSMTRS_RANDOM_CIRCUIT_SAMPLES=10000 cargo test -p qfbvsmtrs --test random_circuits
+QFBVSMTRS_DIFF_RANDOM=1 cargo test -p qfbvsmtrs --test differential_z3
 ```
 
 After the latest corpus-runner and documentation updates, the Python runner was syntax-checked with:
@@ -195,16 +204,26 @@ Merged reports:
 - `qfbvsmtrs_corpus_rerun_logslicing_bvashr.jsonl`
 - `qfbvsmtrs_corpus_rerun_logslicing_bvmul_30s.jsonl`
 - `qfbvsmtrs_corpus_rerun_timeouts120_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_direct_eq_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_sage2_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_asp_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_sydr_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_uclid_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_bouvier_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_float_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_mcm_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_oisc_10s_current_ok.jsonl`
+- `qfbvsmtrs_corpus_rerun_smalltail_10s_current_ok.jsonl`
 
 | Class | Count |
 |---|---:|
-| Conclusive and matched `:status` | 39,000 |
-| Returned `unknown` against known sat/unsat status | 7,175 |
-| Hit hard process timeout | 16 |
+| Conclusive and matched `:status` | 42,554 |
+| Returned `unknown` against known sat/unsat status | 3,622 |
+| Hit hard process timeout | 15 |
 | Frontend/backend error | 0 |
 | Conclusive wrong answer | 0 |
 
-This is an improvement of 5,410 additional conclusive corpus answers over the strict baseline, while preserving zero wrong/error results in the merged reports.
+This is an improvement of 8,964 additional conclusive corpus answers over the strict baseline, while preserving zero wrong/error results in the merged reports.
 ## Recent solver improvements
 
 Recent targeted improvements include:
@@ -221,7 +240,8 @@ Recent targeted improvements include:
 - synchronized Bruttomesso LFSR contradiction recognition for reset-controlled duplicate/injective state machines;
 - Bruttomesso simple-processor decode/output equivalence contradiction recognition;
 - corpus-runner `--record-kinds` / `--record-ok-only` support for improvement-only experimental backend runs;
-- additional builder simplifications for extension/constant comparisons, disjoint-bit addition, and 1-bit ITE equality.
+- additional builder simplifications for extension/constant comparisons, disjoint-bit addition, and 1-bit ITE equality;
+- larger dedicated qfbvsmtrs worker stacks in the CLI and smt-server adapter so very deep generated SMT-LIB formulas return `unknown`/timeout instead of aborting with stack overflow.
 
 Targeted corpus effects observed:
 
@@ -234,42 +254,76 @@ Targeted corpus effects observed:
 | `20190311-bv-term-small-rw-Noetzli` polynomial/linear/Noetzli rewrites | remaining 37 cases solved; unresolved now 0 |
 | `Sage2` affine-byte/bench100--bench131 sampled reruns | 303 additional sampled cases solved |
 | `sage` app1/app2/app7/app8/app9 current/timeout-60/rerun-30s passes | 2,488 additional cases solved; app1/app2/app7/app8/app9 now 0 unresolved |
-| remaining strict timeout sweep at `--timeout 120` | 15 / 31 remaining timeout cases solved; 16 process timeouts remain |
-| `spear` SPLR timeout-cushion/current CVS/10s/30s sampled batches | 1,282 additional sampled cases solved; unresolved now 407 |
-| `uclid` SPLR timeout-cushion reruns | 181 additional cases solved; unresolved now 233 |
+| remaining strict timeout sweep at `--timeout 120` plus bounded BMC follow-up | 16 / 31 timeout-family cases solved; 15 process timeouts remain |
+| `spear` SPLR timeout-cushion/current CVS/10s/30s sampled batches | 1,282 additional sampled cases solved before the later current-solver sweep |
+| `uclid` SPLR timeout-cushion reruns | 181 additional cases solved before the later current-solver sweep |
+| budgeted current-solver rerun over smallest unresolved tail (`qfbvsmtrs_corpus_rerun_direct_eq_ok.jsonl`) | 861 additional cases solved, mostly `Sage2` SAT cases |
+| 10s current-solver `Sage2` sweep/continuation (`qfbvsmtrs_corpus_rerun_sage2_10s_current_ok.jsonl`) | 1,139 additional `Sage2` cases solved |
+| 30s current-solver `Sage2` sweep (`qfbvsmtrs_corpus_rerun_sage2_30s_current_ok.jsonl`) | 34 additional `Sage2` cases solved |
+| bounded `varisat` `Sage2` sweeps (`qfbvsmtrs_corpus_rerun_sage2_varisat_60s_ok.jsonl`) | 132 additional `Sage2` cases solved |
+| 10s current-solver `asp` sweep/continuation (`qfbvsmtrs_corpus_rerun_asp_10s_current_ok.jsonl`) | 58 additional `asp` cases solved |
+| 30s current-solver `asp` sweep/continuation (`qfbvsmtrs_corpus_rerun_asp_30s_current_ok.jsonl`) | 29 additional `asp` cases solved |
+| bounded `varisat` `asp` sweep/continuation (`qfbvsmtrs_corpus_rerun_asp_varisat_60s_ok.jsonl`) | 12 additional `asp` cases solved |
+| 10s current-solver `20210219-Sydr` sweep/continuation (`qfbvsmtrs_corpus_rerun_sydr_10s_current_ok.jsonl`) | 189 additional Sydr cases solved |
+| 30s current-solver `20210219-Sydr` sweep/continuation (`qfbvsmtrs_corpus_rerun_sydr_30s_current_ok.jsonl`) | 44 additional Sydr cases solved |
+| 10s current-solver `uclid` sweep (`qfbvsmtrs_corpus_rerun_uclid_10s_current_ok.jsonl`) | 93 additional `uclid` cases solved |
+| 30s current-solver `uclid` sweep/continuation (`qfbvsmtrs_corpus_rerun_uclid_30s_current_ok.jsonl`) | 131 additional `uclid` cases solved |
+| 10s current-solver `20210312-Bouvier` sweep (`qfbvsmtrs_corpus_rerun_bouvier_10s_current_ok.jsonl`) | 5 additional Bouvier cases solved |
+| 30s current-solver `20210312-Bouvier` sweep (`qfbvsmtrs_corpus_rerun_bouvier_30s_current_ok.jsonl`) | 6 additional Bouvier cases solved |
+| bounded `varisat` `20210312-Bouvier` sweeps (`qfbvsmtrs_corpus_rerun_bouvier_varisat_60s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_bouvier_varisat_120s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_bouvier_varisat_240s_ok.jsonl`) | 163 additional Bouvier cases solved |
+| 10s current-solver `float` sweep/continuation (`qfbvsmtrs_corpus_rerun_float_10s_current_ok.jsonl`) | 43 additional `float` cases solved |
+| 30s current-solver `float` sweep/continuation (`qfbvsmtrs_corpus_rerun_float_30s_current_ok.jsonl`) | 29 additional `float` cases solved |
+| 60s current-solver `float` sweep/continuation (`qfbvsmtrs_corpus_rerun_float_60s_current_ok.jsonl`) | 20 additional `float` cases solved |
+| bounded `varisat` `float` sweeps (`qfbvsmtrs_corpus_rerun_float_varisat_60s_ok.jsonl`) | 20 additional `float` cases solved |
+| 10s current-solver `mcm` sweep (`qfbvsmtrs_corpus_rerun_mcm_10s_current_ok.jsonl`) | 9 additional `mcm` cases solved |
+| 30s current-solver `mcm` sweep (`qfbvsmtrs_corpus_rerun_mcm_30s_current_ok.jsonl`) | 4 additional `mcm` cases solved |
+| 60s current-solver `mcm` sweep (`qfbvsmtrs_corpus_rerun_mcm_60s_current_ok.jsonl`) | 3 additional `mcm` cases solved |
+| bounded `varisat` `mcm` sweeps (`qfbvsmtrs_corpus_rerun_mcm_varisat_60s_ok.jsonl`) | 12 additional `mcm` cases solved |
+| bounded `varisat` `brummayerbiere`/`brummayerbiere2` sweeps (`qfbvsmtrs_corpus_rerun_brummayer12_varisat_60s_ok.jsonl`) | 18 additional Brummayer arithmetic cases solved |
+| 30s current-solver and no-budget SPLR `brummayerbiere3` sweeps (`qfbvsmtrs_corpus_rerun_brummayerbiere3_30s_current_ok.jsonl`, `qfbvsmtrs_corpus_rerun_brummayerbiere3_splr_nobudget_120s_ok.jsonl`) | 7 additional `brummayerbiere3` cases solved |
+| 10s current-solver `20230221-oisc-gurtner` sweep (`qfbvsmtrs_corpus_rerun_oisc_10s_current_ok.jsonl`) | 5 additional OISC cases solved |
+| bounded `varisat` `20230221-oisc-gurtner` sweep (`qfbvsmtrs_corpus_rerun_oisc_varisat_60s_ok.jsonl`) | 1 additional OISC case solved |
+| 30s current-solver `spear` sweep/continuation (`qfbvsmtrs_corpus_rerun_spear_30s_current_ok.jsonl`) | 319 additional `spear` cases solved |
+| 60s current-solver `spear` sweep/continuation (`qfbvsmtrs_corpus_rerun_spear_60s_current_ok.jsonl`) | 64 additional `spear` cases solved |
+| 120s current-solver `spear` sweep (`qfbvsmtrs_corpus_rerun_spear_120s_current_ok.jsonl`) | 3 additional `spear` cases solved |
+| bounded `varisat` `spear` sweeps (`qfbvsmtrs_corpus_rerun_spear_varisat_60s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_spear_varisat_120s_ok.jsonl`) | 15 additional `spear` cases solved |
+| 10s current-solver small-tail sweep (`qfbvsmtrs_corpus_rerun_smalltail_10s_current_ok.jsonl`) | 25 additional smaller-family cases solved |
+| bounded `varisat` `uclid` sweep (`qfbvsmtrs_corpus_rerun_uclid_varisat_60s_ok.jsonl`) | 6 additional `uclid_contrib` cases solved |
+| bounded `varisat` BMC/Mann sweep (`qfbvsmtrs_corpus_rerun_bmc_mann_varisat_120s_ok.jsonl`) | 16 additional BMC/Mann cases solved |
+| bounded `varisat`/no-budget SPLR small-family sweeps (`qfbvsmtrs_corpus_rerun_p4dfa_varisat_60s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_small_varisat_60s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_small_splr_nobudget_60s_ok.jsonl`, `qfbvsmtrs_corpus_rerun_grs_wienand_varisat_60s_ok.jsonl`) | 36 additional smaller-family cases solved |
 | `bruttomesso` extensional + LFSR + simple-processor cases | unresolved reduced from 672 to 0 cases |
 
 ## Remaining non-conclusive category breakdown
 
-Latest merged unresolved counts under strict/targeted budgets total `7,191` cases: `7,175` `unknown` and `16` process timeouts. The tail is solver-hard and preprocessing-limited rather than parser/front-end failures.
+Latest merged unresolved counts under strict/targeted budgets total `3,637` cases: `3,622` `unknown` and `15` process timeouts. The tail is solver-hard and preprocessing-limited rather than parser/front-end failures.
 
 | Category / family | Remaining | Kind split | Expected status split | Character |
 |---|---:|---:|---:|---|
-| `Sage2` | 4,701 | 4,700 unknown / 1 timeout | 2,773 sat / 1,928 unsat | Dominant tail; large generated BV/SAT instances, mostly hard after bit-blasting. |
-| `asp` | 465 | 465 unknown | 347 sat / 118 unsat | Combinatorial puzzle encodings such as N-Queens, TSP, Sokoban, graph coloring, and routing. |
-| `spear` | 407 | 407 unknown | 407 sat / 0 unsat | Symbolic-execution C program VCs; remaining cases are `samba_v3.0.24` 311, `inn_v2.4.3` 69, `wget_v1.10.2` 19, and `openldap_v2.3.35` 8. |
-| `20210219-Sydr` | 344 | 344 unknown | 151 sat / 193 unsat | Symbolic-execution/path-constraint formulas, including symbolic-memory cases. |
-| `uclid` + `uclid_contrib_smtcomp09` | 233 | 233 unknown | 224 sat / 9 unsat | Program/circuit verification constraints, mainly `uclid/catchconv`. |
-| `20210312-Bouvier` | 200 | 200 unknown | 100 sat / 100 unsat | Generated `vlsat3_*` cases. |
-| `float` | 191 | 191 unknown | 101 sat / 90 unsat | Floating-point-style arithmetic encoded as pure bit-vectors. |
-| `mcm` | 131 | 131 unknown | 98 sat / 33 unsat | Arithmetic/synthesis-style BV constraints. |
-| `20230221-oisc-gurtner` | 112 | 112 unknown | 12 sat / 100 unsat | OISC/program-transition style nested BV constraints. |
-| `brummayerbiere*` arithmetic/bit-hack families | 140 | 140 unknown | 14 sat / 126 unsat | Bit-hack, overflow, min/max, multiplication, and integer-root identities. |
+| `Sage2` | 2,566 | 2,565 unknown / 1 timeout | 1,381 sat / 1,185 unsat | Dominant tail; large generated BV/SAT instances, mostly hard after bit-blasting. |
+| `asp` | 366 | 366 unknown | 286 sat / 80 unsat | Combinatorial puzzle encodings such as N-Queens, TSP, Sokoban, graph coloring, and routing. |
+| `20230221-oisc-gurtner` | 106 | 106 unknown | 12 sat / 94 unsat | OISC/program-transition style nested BV constraints. |
+| `mcm` | 103 | 103 unknown | 76 sat / 27 unsat | Arithmetic/synthesis-style BV constraints. |
+| `brummayerbiere*` arithmetic/bit-hack families | 91 | 91 unknown | 5 sat / 86 unsat | Bit-hack, overflow, min/max, multiplication, and integer-root identities. |
+| `20210219-Sydr` | 91 | 91 unknown | 91 sat / 0 unsat | Symbolic-execution/path-constraint formulas, including symbolic-memory cases. |
+| `float` | 79 | 79 unknown | 41 sat / 38 unsat | Floating-point-style arithmetic encoded as pure bit-vectors. |
 | `log-slicing` | 57 | 57 unknown | 0 sat / 57 unsat | All remaining cases are division/remainder/multiplication equivalences: `bvmul`, `bvudiv`, `bvurem`, `bvsdiv`, `bvsrem`, `bvsmod`. |
-| `bmc-bv` + `bmc-bv-svcomp14` | 32 | 18 unknown / 14 timeout | 7 sat / 25 unsat | BMC transition-system cases; includes most process timeouts. |
-| Other smaller families | 178 | 177 unknown / 1 timeout | 89 sat / 89 unsat | Smaller tails across `20221214-p4dfa-XiaoqiChen`, `20230224-grsbits-truby`, `2019-Wolf-fmbench`, `calypto`, `RWS`, `fft`, `wienand-cav2008`, `VS3`, and other single-digit families. |
+| `20210312-Bouvier` | 26 | 26 unknown | 25 sat / 1 unsat | Remaining generated `vlsat3_*` cases after bounded `varisat` reruns. |
+| `bmc-bv` + `bmc-bv-svcomp14` | 18 | 5 unknown / 13 timeout | 6 sat / 12 unsat | BMC transition-system cases; includes most process timeouts. |
+| `spear` | 6 | 6 unknown | 6 sat / 0 unsat | Symbolic-execution C program VCs; small OpenLDAP tail remains after 30s/60s/120s sweeps. |
+| `uclid` + `uclid_contrib_smtcomp09` | 3 | 3 unknown | 2 sat / 1 unsat | Program/circuit verification constraints. |
+| Other smaller families | 125 | 124 unknown / 1 timeout | 58 sat / 67 unsat | Smaller tails across `20221214-p4dfa-XiaoqiChen`, `20230224-grsbits-truby`, `2019-Wolf-fmbench`, `calypto`, `RWS`, `fft`, `wienand-cav2008`, `VS3`, and other single-digit families. |
 
-The `16` process timeouts are concentrated in `bmc-bv-svcomp14` (`11`), `bmc-bv` (`3`), `Sage2/bench_9140.smt2` (`1`), and `2019-Mann/ridecore-qf_bv-bug.smt2` (`1`).
+The `15` process timeouts are concentrated in `bmc-bv-svcomp14` (`11`), `bmc-bv` (`2`), `Sage2/bench_9140.smt2` (`1`), and `2019-Mann/ridecore-qf_bv-bug.smt2` (`1`).
 
 ## Production-readiness assessment
 
 `qfbvsmtrs` is ready for continued integration testing and controlled experimentation as a third backend in `smt-server`. It is not yet ready to claim production completeness for arbitrary SMT-LIB QF_BV because:
 
-- latest merged corpus still has `7,175` `unknown` cases and `16` timeouts under strict budgets/targeted reruns;
+- latest merged corpus still has `3,622` `unknown` cases and `15` timeouts under strict budgets/targeted reruns;
 - full no-budget/no-timeout corpus completion has not been demonstrated;
 - full-corpus Z3 differential testing has not been completed;
 - a long-running fuzzing campaign has not been completed;
-- some important families (`Sage2`, `asp`, `spear`, `uclid`) still need major performance/simplification work.
+- some important families (`Sage2`, `asp`, `mcm`, `20230221-oisc-gurtner`, `float`, and `20210219-Sydr`) still need major performance/simplification work.
 
 ## Recommended next steps
 

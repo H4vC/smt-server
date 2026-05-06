@@ -1,5 +1,14 @@
 //! Standalone pure-Rust QF_BV SMT solver via bit-blasting.
 
+/// Stack reserved for qfbvsmtrs worker threads.
+///
+/// Large SMT-LIB generated formulas can be deeply nested enough to overflow
+/// Rust's default thread stack during frontend/simplification traversals. The
+/// standalone CLI and smt-server adapter use this stack size for qfbvsmtrs
+/// worker threads so those cases degrade to `unknown`/timeout instead of
+/// aborting the process.
+pub const DEFAULT_WORKER_STACK_BYTES: usize = 512 * 1024 * 1024;
+
 pub mod blast;
 pub mod builder;
 pub mod circuits;

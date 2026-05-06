@@ -60,7 +60,7 @@ fn solve_response(
                         model.encode()?,
                     )
                 } else {
-                    BinaryResponse::new(request_id, Status::Sat, 0, Vec::new())
+                    BinaryResponse::error(request_id, "SAT backend omitted requested model")
                 }
             } else {
                 BinaryResponse::new(request_id, Status::Sat, 0, Vec::new())
@@ -76,14 +76,27 @@ fn solve_response(
                         core.encode()?,
                     )
                 } else {
-                    BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new())
+                    BinaryResponse::error(request_id, "UNSAT backend omitted requested core")
                 }
             } else {
                 BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new())
             }
         }
-        QueryStatus::Unknown => BinaryResponse::new(request_id, Status::Unknown, 0, Vec::new()),
+        QueryStatus::Unknown => unknown_response(request_id, result.message),
         QueryStatus::Ok => BinaryResponse::error(request_id, "SOLVE backend returned OK"),
+    }
+}
+
+fn unknown_response(request_id: u32, message: Option<String>) -> smt_wire::Result<BinaryResponse> {
+    if let Some(message) = message.filter(|message| !message.is_empty()) {
+        BinaryResponse::new(
+            request_id,
+            Status::Unknown,
+            response_flags::HAS_MESSAGE,
+            message.into_bytes(),
+        )
+    } else {
+        BinaryResponse::new(request_id, Status::Unknown, 0, Vec::new())
     }
 }
 
@@ -100,7 +113,7 @@ fn simplify_response(request_id: u32, result: QueryResult) -> smt_wire::Result<B
                 simplify.encode()?,
             )
         }
-        QueryStatus::Unknown => BinaryResponse::new(request_id, Status::Unknown, 0, Vec::new()),
+        QueryStatus::Unknown => unknown_response(request_id, result.message),
         QueryStatus::Sat | QueryStatus::Unsat => {
             BinaryResponse::error(request_id, "SIMPLIFY backend returned SAT/UNSAT")
         }
@@ -118,6 +131,12 @@ fn optimize_response(
                 WireError::invalid("optimization response", "SAT result without optimum block")
             })?;
             let want_model = (request.envelope.flags & smt_wire::request_flags::WANT_MODEL) != 0;
+            if want_model && optimization.model.is_none() {
+                return BinaryResponse::error(
+                    request_id,
+                    "optimization backend omitted requested model",
+                );
+            }
             if !want_model {
                 optimization.model = None;
             }
@@ -128,7 +147,7 @@ fn optimize_response(
             BinaryResponse::new(request_id, Status::Sat, flags, optimization.encode()?)
         }
         QueryStatus::Unsat => BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new()),
-        QueryStatus::Unknown => BinaryResponse::new(request_id, Status::Unknown, 0, Vec::new()),
+        QueryStatus::Unknown => unknown_response(request_id, result.message),
         QueryStatus::Ok => BinaryResponse::error(request_id, "optimization backend returned OK"),
     }
 }

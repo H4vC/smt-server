@@ -3,6 +3,10 @@ use std::sync::Mutex;
 
 use smt_wire::{constants::RESPONSE_MAGIC, request::is_binary_request_payload};
 
+pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 4096;
+pub const DEFAULT_MAX_CACHE_KEY_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_CACHED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Simple cache counters for tests and observability.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CacheStats {
@@ -12,15 +16,46 @@ pub struct CacheStats {
 }
 
 /// In-memory request/response cache for the stateless protocol.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResponseCache {
     entries: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
     stats: Mutex<CacheStats>,
+    max_entries: usize,
+    max_key_bytes: usize,
+    max_response_bytes: usize,
+}
+
+impl Default for ResponseCache {
+    fn default() -> Self {
+        Self::with_limits(
+            DEFAULT_MAX_CACHE_ENTRIES,
+            DEFAULT_MAX_CACHE_KEY_BYTES,
+            DEFAULT_MAX_CACHED_RESPONSE_BYTES,
+        )
+    }
 }
 
 impl ResponseCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_limits(
+        max_entries: usize,
+        max_key_bytes: usize,
+        max_response_bytes: usize,
+    ) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            stats: Mutex::new(CacheStats::default()),
+            max_entries,
+            max_key_bytes,
+            max_response_bytes,
+        }
+    }
+
+    pub fn accepts_payload(&self, payload: &[u8]) -> bool {
+        self.max_entries != 0 && payload.len() <= self.max_key_bytes
     }
 
     pub fn lookup(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -40,7 +75,16 @@ impl ResponseCache {
     }
 
     pub fn insert(&self, key: Vec<u8>, response: Vec<u8>) {
+        if self.max_entries == 0
+            || key.len() > self.max_key_bytes
+            || response.len() > self.max_response_bytes
+        {
+            return;
+        }
         if let Ok(mut entries) = self.entries.lock() {
+            if entries.len() >= self.max_entries {
+                entries.clear();
+            }
             entries.insert(key, response);
         }
         if let Ok(mut stats) = self.stats.lock() {

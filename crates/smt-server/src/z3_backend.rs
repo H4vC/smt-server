@@ -1,10 +1,12 @@
+use std::time::{Duration, Instant};
+
 use smt_wire::{
     request_flags, tag, BinaryRequest, BlobRef, Command, ModelBlock, ModelEntry, NodeRef,
     OptimizationValueBlock, ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
 use z3::{
     ast::{Bool, BV},
-    Config, Model, SatResult, Solver,
+    Config, Model, Params, SatResult, Solver,
 };
 
 use crate::backend::{Backend, QueryResult};
@@ -299,6 +301,7 @@ fn translate(request: &BinaryRequest) -> smt_wire::Result<Z3Translation> {
 }
 
 fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+    let deadline = Z3Deadline::from_budget_ms(request.envelope.budget_ms);
     let expr = request.expression_view()?;
     let translation = translate(request)?;
     let solver = Solver::new();
@@ -326,7 +329,7 @@ fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         .map(|root| translation.bool(*root))
         .collect::<smt_wire::Result<Vec<_>>>()?;
 
-    match solver.check_assumptions(&assumptions) {
+    match check_assumptions_with_deadline(&solver, &assumptions, deadline)? {
         SatResult::Sat => {
             let model = if want_model {
                 let model = solver.get_model().ok_or_else(|| {
@@ -354,7 +357,48 @@ fn solve(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Z3Deadline {
+    deadline: Option<Instant>,
+}
+
+impl Z3Deadline {
+    fn from_budget_ms(budget_ms: u32) -> Self {
+        let deadline =
+            (budget_ms != 0).then(|| Instant::now() + Duration::from_millis(u64::from(budget_ms)));
+        Self { deadline }
+    }
+
+    fn remaining_timeout_ms(self) -> Option<u32> {
+        let deadline = self.deadline?;
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        Some(remaining.as_millis().clamp(1, u128::from(u32::MAX)) as u32)
+    }
+}
+
+fn check_assumptions_with_deadline(
+    solver: &Solver,
+    assumptions: &[Bool],
+    deadline: Z3Deadline,
+) -> smt_wire::Result<SatResult> {
+    if let Some(timeout) = deadline.remaining_timeout_ms() {
+        let mut params = Params::new();
+        params.set_u32("timeout", timeout);
+        solver.set_params(&params);
+    } else if deadline.deadline.is_some() {
+        return Ok(SatResult::Unknown);
+    }
+    Ok(solver.check_assumptions(assumptions))
+}
+
+fn z3_unknown_reason(solver: &Solver) -> String {
+    solver
+        .get_reason_unknown()
+        .unwrap_or_else(|| "z3 returned unknown".to_owned())
+}
+
 fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+    let deadline = Z3Deadline::from_budget_ms(request.envelope.budget_ms);
     let translation = translate(request)?;
     let solver = Solver::new();
     for root in &request.assertion_roots {
@@ -367,16 +411,10 @@ fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         .map(|root| translation.bool(*root))
         .collect::<smt_wire::Result<Vec<_>>>()?;
 
-    match solver.check_assumptions(&fixed) {
+    match check_assumptions_with_deadline(&solver, &fixed, deadline)? {
         SatResult::Sat => {}
         SatResult::Unsat => return Ok(QueryResult::unsat(None)),
-        SatResult::Unknown => {
-            return Ok(QueryResult::unknown(
-                solver
-                    .get_reason_unknown()
-                    .unwrap_or_else(|| "z3 returned unknown".to_owned()),
-            ))
-        }
+        SatResult::Unknown => return Ok(QueryResult::unknown(z3_unknown_reason(&solver))),
     }
 
     let target_ref = request
@@ -405,7 +443,7 @@ fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         };
         let mut assumptions = fixed.clone();
         assumptions.push(first_try.clone());
-        match solver.check_assumptions(&assumptions) {
+        match check_assumptions_with_deadline(&solver, &assumptions, deadline)? {
             SatResult::Sat => {
                 fixed.push(first_try);
                 if prefer_one {
@@ -422,20 +460,14 @@ fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
                     set_bit(&mut optimum, bit);
                 }
             }
-            SatResult::Unknown => {
-                return Ok(QueryResult::unknown(
-                    solver
-                        .get_reason_unknown()
-                        .unwrap_or_else(|| "z3 returned unknown".to_owned()),
-                ))
-            }
+            SatResult::Unknown => return Ok(QueryResult::unknown(z3_unknown_reason(&solver))),
         }
     }
 
-    match solver.check_assumptions(&fixed) {
+    match check_assumptions_with_deadline(&solver, &fixed, deadline)? {
         SatResult::Sat => {}
         SatResult::Unsat => return Ok(QueryResult::unsat(None)),
-        SatResult::Unknown => return Ok(QueryResult::unknown("z3 returned unknown")),
+        SatResult::Unknown => return Ok(QueryResult::unknown(z3_unknown_reason(&solver))),
     }
 
     let want_model = (request.envelope.flags & request_flags::WANT_MODEL) != 0;
@@ -666,4 +698,19 @@ fn ones_bv(width: u32) -> BV {
 
 fn set_bit(bytes: &mut [u8], bit: u32) {
     bytes[(bit / 8) as usize] |= 1 << (bit % 8);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_returns_unknown_without_checking_z3() {
+        let solver = Solver::new();
+        let deadline = Z3Deadline {
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+        };
+        let result = check_assumptions_with_deadline(&solver, &[], deadline).unwrap();
+        assert_eq!(result, SatResult::Unknown);
+    }
 }

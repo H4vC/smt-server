@@ -251,6 +251,16 @@ def main() -> int:
         help="only queue paths containing this substring; can be repeated",
     )
     parser.add_argument(
+        "--path-component",
+        action="append",
+        default=[],
+        help=(
+            "only queue paths with this exact normalized path component; can be repeated. "
+            "Useful for benchmark-family filters such as --path-component asp "
+            "without also matching unrelated names like jasper."
+        ),
+    )
+    parser.add_argument(
         "--path-regex",
         help="only queue paths matching this regular expression",
     )
@@ -352,6 +362,11 @@ def main() -> int:
         ):
             skipped["path-filter"] += 1
             continue
+        if args.path_component:
+            components = set(rel_norm.split("/"))
+            if not any(component in components for component in args.path_component):
+                skipped["path-filter"] += 1
+                continue
         if path_regex and not (path_regex.search(rel) or path_regex.search(rel_norm)):
             skipped["path-filter"] += 1
             continue
@@ -413,6 +428,7 @@ def main() -> int:
                 "exclude_reports": [str(path) for path in args.exclude_report],
                 "attempt_report": str(args.attempt_report) if args.attempt_report else None,
                 "output_report": str(args.report),
+                "path_components": args.path_component,
                 "record_kinds": sorted(record_kinds),
                 "sort_by": args.sort_by,
                 "max_wall_seconds": args.max_wall_seconds,
@@ -535,6 +551,9 @@ def main() -> int:
         {
             "exclude_reports": [str(path) for path in args.exclude_report],
             "attempt_report": str(args.attempt_report) if args.attempt_report else None,
+            "path_contains": args.path_contains,
+            "path_component": args.path_component,
+            "path_regex": args.path_regex,
             "sort_by": args.sort_by,
             "min_baseline_elapsed": args.min_baseline_elapsed,
             "max_baseline_elapsed": args.max_baseline_elapsed,
