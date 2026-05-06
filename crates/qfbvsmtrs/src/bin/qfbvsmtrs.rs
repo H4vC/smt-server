@@ -23,6 +23,7 @@ struct CliOptions {
     input: Option<PathBuf>,
     budget_ms: Option<u64>,
     sat_backend: Option<qfbvsmtrs::SatBackendKind>,
+    shortcut_mode: Option<qfbvsmtrs::ShortcutMode>,
     max_input_bytes: Option<u64>,
     trace: bool,
 }
@@ -53,6 +54,9 @@ fn run() -> qfbvsmtrs::Result<()> {
     if let Some(kind) = options.sat_backend {
         config = config.with_sat_backend(kind);
     }
+    if let Some(mode) = options.shortcut_mode {
+        config = config.with_shortcut_mode(mode);
+    }
     let solve_start = std::time::Instant::now();
     let result = qfbvsmtrs::Solver::new(config).solve(&query)?;
     if options.trace {
@@ -82,6 +86,9 @@ fn parse_args() -> qfbvsmtrs::Result<CliOptions> {
     if let Some(backend) = std::env::var_os("QFBVSMTRS_SAT_BACKEND") {
         options.sat_backend = Some(parse_sat_backend("QFBVSMTRS_SAT_BACKEND", backend)?);
     }
+    if let Some(mode) = std::env::var_os("QFBVSMTRS_SHORTCUT_MODE") {
+        options.shortcut_mode = Some(parse_shortcut_mode("QFBVSMTRS_SHORTCUT_MODE", mode)?);
+    }
     if let Some(max) = std::env::var_os("QFBVSMTRS_MAX_INPUT_BYTES") {
         options.max_input_bytes = Some(parse_u64_os("QFBVSMTRS_MAX_INPUT_BYTES", max)?);
     }
@@ -108,6 +115,13 @@ fn parse_args() -> qfbvsmtrs::Result<CliOptions> {
             options.sat_backend = Some(parse_sat_backend("--sat-backend", value)?);
         } else if let Some(value) = split_arg_value(&arg, "--sat-backend=")? {
             options.sat_backend = Some(parse_sat_backend_str("--sat-backend", value)?);
+        } else if arg == "--shortcut-mode" {
+            let value = args
+                .next()
+                .ok_or_else(|| qfbvsmtrs::Error::invalid("--shortcut-mode", "missing value"))?;
+            options.shortcut_mode = Some(parse_shortcut_mode("--shortcut-mode", value)?);
+        } else if let Some(value) = split_arg_value(&arg, "--shortcut-mode=")? {
+            options.shortcut_mode = Some(parse_shortcut_mode_str("--shortcut-mode", value)?);
         } else if arg == "--max-input-bytes" {
             let value = args
                 .next()
@@ -192,6 +206,32 @@ fn parse_sat_backend_str(
     }
 }
 
+fn parse_shortcut_mode(
+    context: &'static str,
+    value: OsString,
+) -> qfbvsmtrs::Result<qfbvsmtrs::ShortcutMode> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| qfbvsmtrs::Error::invalid(context, "value is not UTF-8"))?;
+    parse_shortcut_mode_str(context, value)
+}
+
+fn parse_shortcut_mode_str(
+    context: &'static str,
+    value: &str,
+) -> qfbvsmtrs::Result<qfbvsmtrs::ShortcutMode> {
+    match value {
+        "enabled" => Ok(qfbvsmtrs::ShortcutMode::Enabled),
+        "disabled" => Ok(qfbvsmtrs::ShortcutMode::Disabled),
+        "validate-sat-witnesses" | "validate" => Ok(qfbvsmtrs::ShortcutMode::ValidateSatWitnesses),
+        "audit" => Ok(qfbvsmtrs::ShortcutMode::Audit),
+        _ => Err(qfbvsmtrs::Error::invalid(
+            context,
+            "expected enabled, disabled, validate-sat-witnesses, or audit",
+        )),
+    }
+}
+
 fn read_input(path: Option<&PathBuf>, max_input_bytes: Option<u64>) -> qfbvsmtrs::Result<String> {
     let mut script = String::new();
     let limit = max_input_bytes
@@ -250,10 +290,11 @@ fn print_help() {
          Options:\n\
            --budget-ms N          Total solver budget in milliseconds\n\
            --sat-backend KIND     SAT backend: splr, varisat, or dpll\n\
+           --shortcut-mode MODE   Shortcuts: enabled, disabled, validate-sat-witnesses, or audit\n\
            --max-input-bytes N    Bound SMT-LIB input allocation\n\
            --trace                Print timing trace to stderr\n\
            -h, --help             Show this help\n\n\
          Environment fallbacks: QFBVSMTRS_BUDGET_MS, QFBVSMTRS_SAT_BACKEND,\n\
-         QFBVSMTRS_MAX_INPUT_BYTES, QFBVSMTRS_TRACE."
+         QFBVSMTRS_SHORTCUT_MODE, QFBVSMTRS_MAX_INPUT_BYTES, QFBVSMTRS_TRACE."
     );
 }

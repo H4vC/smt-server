@@ -16,7 +16,14 @@ fn standalone_cli_supports_budget_backend_and_input_bound() {
         .join("known")
         .join("simple_unsat.smt2");
     let output = ProcessCommand::new(exe)
-        .args(["--budget-ms", "1000", "--sat-backend", "dpll"])
+        .args([
+            "--budget-ms",
+            "1000",
+            "--sat-backend",
+            "dpll",
+            "--shortcut-mode",
+            "disabled",
+        ])
         .arg(&fixture)
         .output()
         .expect("run qfbvsmtrs CLI");
