@@ -37,7 +37,7 @@ pub fn blast_query_with_deadline(query: &Query, deadline: Option<Instant>) -> Re
         values: vec![None; query.arena.len()],
         variables: Vec::new(),
     };
-    let reachable = reachable_terms(query)?;
+    let reachable = reachable_terms(query, deadline)?;
 
     for (index, node) in query.arena.nodes().iter().enumerate() {
         if index % 1024 == 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -380,13 +380,19 @@ fn use_constant_multiplier(bytes: &[u8], width: usize) -> bool {
         })
 }
 
-fn reachable_terms(query: &Query) -> Result<Vec<bool>> {
+fn reachable_terms(query: &Query, deadline: Option<Instant>) -> Result<Vec<bool>> {
     let mut reachable = vec![false; query.arena.len()];
     let mut stack = query.assertions_and_assumptions().collect::<Vec<_>>();
     if let Some(target) = query.target {
         stack.push(target);
     }
+    let mut steps = 0usize;
     while let Some(id) = stack.pop() {
+        if steps.is_multiple_of(4096) && deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(Error::Timeout);
+        }
+        steps += 1;
         let slot = reachable.get_mut(id.index()).ok_or_else(|| {
             Error::invalid("term id", format!("term {} is out of bounds", id.raw()))
         })?;

@@ -674,17 +674,34 @@ fn parse_let(
         SExpr::List(items) => items,
         _ => return Err(Error::invalid("let", "expected binding list")),
     };
-    let mut nested = locals.clone();
+    let mut parsed_bindings = Vec::with_capacity(bindings.len());
     for binding in bindings {
         let pair = match binding {
             SExpr::List(pair) if pair.len() == 2 => pair,
             _ => return Err(Error::invalid("let", "bad binding")),
         };
         let name = atom(&pair[0])?.to_owned();
-        let value = parse_expr_with_locals(state, &pair[1], &mut nested)?;
-        nested.insert(name, value);
+        let value = parse_expr_with_locals(state, &pair[1], locals)?;
+        parsed_bindings.push((name, value));
     }
-    parse_expr_with_locals(state, &items[2], &mut nested)
+
+    let mut shadowed = Vec::with_capacity(parsed_bindings.len());
+    for (name, value) in parsed_bindings {
+        let previous = locals.insert(name.clone(), value);
+        shadowed.push((name, previous));
+    }
+    let result = parse_expr_with_locals(state, &items[2], locals);
+    for (name, previous) in shadowed.into_iter().rev() {
+        match previous {
+            Some(value) => {
+                locals.insert(name, value);
+            }
+            None => {
+                locals.remove(&name);
+            }
+        }
+    }
+    result
 }
 
 fn parse_equals(
@@ -1691,5 +1708,27 @@ impl ParsingAction for SExprAction {
         attribute: Self::Attribute,
     ) -> ParsingResult<Self::Command> {
         Ok(command("set-option", [attribute]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    #[test]
+    fn let_bindings_are_simultaneous() -> Result<()> {
+        let query = parse_smt2(
+            r#"
+(set-logic QF_BV)
+(declare-fun x () (_ BitVec 1))
+(assert (= x (_ bv1 1)))
+(assert (let ((x (_ bv0 1)) (y x)) (= y (_ bv1 1))))
+(check-sat)
+"#,
+        )?;
+        let mut solver = Solver::new(Config::default());
+        assert_eq!(solver.solve(&query)?.status, SolveStatus::Sat);
+        Ok(())
     }
 }

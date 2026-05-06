@@ -110,14 +110,14 @@ Merged with the full baseline these targeted passes yield:
 
 ## Latest merged status
 
-Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `sage` app slices, `log-slicing` add/sub/comparison/shift cases, `brummayerbiere4`, `challenge`, Noetzli polynomial/algebraic rewrite cases, Bruttomesso extensional/LFSR/simple-processor cases, sampled/high-budget `spear` batches, `uclid`, `bvurem` fixed-point, Favaro MBA, Yurichev popcount contradiction cases, a budgeted current-solver rerun over the smallest unresolved tail (`qfbvsmtrs_corpus_rerun_direct_eq_ok.jsonl`), 10s current-solver sweeps and continuations for `Sage2`, `asp`, `20210219-Sydr`, `uclid`, `20210312-Bouvier`, `float`, `mcm`, and `20230221-oisc-gurtner`, 30s current-solver sweeps for `Sage2`, `spear`, `asp`, `float`, `uclid`, `mcm`, `brummayerbiere3`, and `20210219-Sydr`, bounded `varisat` experimental sweeps for `Sage2`, `20210312-Bouvier`, `asp`, `spear`, `float`, `mcm`, `20230221-oisc-gurtner`, `uclid`, `20221214-p4dfa-XiaoqiChen`, BMC/Mann, Brummayer arithmetic families, and small families, a small-tail 10s sweep, and the final timeout sweep.
+Additional incremental reports after the earlier passes include targeted reruns for `Sage2` samples, `sage` app slices, `log-slicing` add/sub/comparison/shift cases, `brummayerbiere4`, `challenge`, Noetzli polynomial/algebraic rewrite cases, Bruttomesso extensional/LFSR/simple-processor cases, sampled/high-budget `spear` batches, `uclid`, `bvurem` fixed-point, Favaro MBA, Yurichev popcount contradiction cases, a budgeted current-solver rerun over the smallest unresolved tail (`qfbvsmtrs_corpus_rerun_direct_eq_ok.jsonl`), 10s/30s/60s/120s current-solver sweeps and continuations for `Sage2`, `asp`, `20210219-Sydr`, `uclid`, `20210312-Bouvier`, `float`, `mcm`, `20230221-oisc-gurtner`, plus 120s/240s `20221214-p4dfa-XiaoqiChen` sweeps, bounded `varisat` experimental sweeps for `Sage2`, `20210312-Bouvier`, `asp`, `spear`, `float`, `mcm`, `20230221-oisc-gurtner`, `uclid`, `20221214-p4dfa-XiaoqiChen`, BMC/Mann, Brummayer arithmetic families, `log-slicing`, and small families, a polynomial-definition sweep for `wienand-cav2008`, a Sage2 polynomial pack-equivalence sweep, a Brummayer popcount/rotate/shift-right bit-hack sweep, a Brummayer leading-zero parse/simplification sweep, a bounded `varisat` Brummayer leading-zero follow-up, a 60s SPLR `log-slicing` multiplication follow-up, a small-tail 10s sweep, and the final timeout sweep.
 
 Latest merged-by-path status across the full baseline and targeted reports currently stands at:
 
 | Class | Count |
 |---|---:|
-| Conclusive and matched `:status` | 42,554 |
-| Returned `unknown` against a known sat/unsat status | 3,622 |
+| Conclusive and matched `:status` | 42,910 |
+| Returned `unknown` against a known sat/unsat status | 3,266 |
 | Hit the hard process timeout | 15 |
 | Frontend/backend error | 0 |
 | Conclusive wrong answer | 0 |
@@ -126,19 +126,18 @@ Remaining non-conclusive cases by category:
 
 | Category / family | Remaining | Kind split | Expected status split | Character |
 |---|---:|---:|---:|---|
-| `Sage2` | 2,566 | 2,565 unknown / 1 timeout | 1,381 sat / 1,185 unsat | Large generated BV/SAT instances; dominant hard tail. |
-| `asp` | 366 | 366 unknown | 286 sat / 80 unsat | Combinatorial puzzle encodings: N-Queens, TSP, Sokoban, graph coloring, routing, etc. |
+| `Sage2` | 2,305 | 2,304 unknown / 1 timeout | 1,261 sat / 1,044 unsat | Large generated BV/SAT instances; dominant hard tail. |
+| `asp` | 342 | 342 unknown | 268 sat / 74 unsat | Combinatorial puzzle encodings: N-Queens, TSP, Sokoban, graph coloring, routing, etc. |
 | `20230221-oisc-gurtner` | 106 | 106 unknown | 12 sat / 94 unsat | OISC/program-transition style nested BV constraints. |
-| `mcm` | 103 | 103 unknown | 76 sat / 27 unsat | Arithmetic/synthesis-style BV constraints. |
-| `brummayerbiere*` arithmetic/bit-hack families | 91 | 91 unknown | 5 sat / 86 unsat | Bit-hack, overflow, min/max, multiplication, and integer-root identities. |
+| `mcm` | 97 | 97 unknown | 74 sat / 23 unsat | Arithmetic/synthesis-style BV constraints. |
+| `brummayerbiere*` arithmetic/bit-hack families | 71 | 71 unknown | 4 sat / 67 unsat | Bit-hack, overflow, min/max, multiplication, and integer-root identities. |
 | `20210219-Sydr` | 91 | 91 unknown | 91 sat / 0 unsat | Symbolic-execution/path-constraint formulas, including symbolic memory. |
-| `float` | 79 | 79 unknown | 41 sat / 38 unsat | Floating-point-style arithmetic encoded as pure BV. |
-| `log-slicing` | 57 | 57 unknown | 0 sat / 57 unsat | Remaining division/remainder/multiplication equivalences. |
-| `20210312-Bouvier` | 26 | 26 unknown | 25 sat / 1 unsat | Remaining generated `vlsat3_*` cases after bounded `varisat` reruns. |
+| `float` | 72 | 72 unknown | 37 sat / 35 unsat | Floating-point-style arithmetic encoded as pure BV. |
+| `log-slicing` | 55 | 55 unknown | 0 sat / 55 unsat | Remaining division/remainder/multiplication equivalences. |
+| `20210312-Bouvier` | 23 | 23 unknown | 22 sat / 1 unsat | Remaining generated `vlsat3_*` cases after bounded `varisat` reruns. |
 | `bmc-bv` + `bmc-bv-svcomp14` | 18 | 5 unknown / 13 timeout | 6 sat / 12 unsat | BMC transition-system cases; includes most process timeouts. |
-| `spear` | 6 | 6 unknown | 6 sat / 0 unsat | Symbolic-execution C VCs; small OpenLDAP tail remains after 30s/60s/120s sweeps. |
-| `uclid` + `uclid_contrib_smtcomp09` | 3 | 3 unknown | 2 sat / 1 unsat | Program/circuit verification constraints. |
-| Other smaller families | 125 | 124 unknown / 1 timeout | 58 sat / 67 unsat | Smaller tails across p4dfa, grsbits, fmbench, calypto, RWS, fft, VS3, and other families. |
+| `spear` | 5 | 5 unknown | 5 sat / 0 unsat | Symbolic-execution C VCs; small OpenLDAP tail remains after 30s/60s/120s/240s sweeps. |
+| Other smaller families | 96 | 95 unknown / 1 timeout | 44 sat / 52 unsat | Smaller tails across p4dfa, grsbits, fmbench, calypto, RWS, fft, VS3, and other families. |
 
 The `15` process timeouts are concentrated in `bmc-bv-svcomp14` (`11`), `bmc-bv` (`2`), `Sage2/bench_9140.smt2` (`1`), and `2019-Mann/ridecore-qf_bv-bug.smt2` (`1`).
 
@@ -181,7 +180,7 @@ python scripts/qfbvsmtrs_corpus.py target/smtlib/QF_BV-2025 \
   --list-only
 ```
 
-For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 3,637 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
+For the original strict full-run baseline this queues 12,601 non-conclusive files and skips 33,590 known-good files. With the latest merged targeted reports, the non-conclusive set is down to 3,281 files. Re-running the same command resumes automatically because paths already present in the output report are skipped. Multiple `--baseline-report` arguments can be supplied; later reports override earlier records by path, so follow-up runs can skip cases solved by prior incremental passes.
 
 Improvement-only experimental runs can avoid recording unknown/timeout regressions while still preserving solved cases:
 

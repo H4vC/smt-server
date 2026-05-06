@@ -21,16 +21,24 @@ pub fn solve_cnf(
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return SatResult::Unknown("budget exhausted".to_owned());
     }
-    match backend {
-        SatBackendKind::Splr => solve_with_splr(num_vars, clauses, assumptions, deadline),
-        SatBackendKind::Varisat => solve_with_varisat(num_vars, clauses, assumptions, deadline),
-        SatBackendKind::Dpll => DpllSolver::new(num_vars, clauses, deadline).solve(assumptions),
+    let result = match backend {
+        SatBackendKind::Splr => solve_with_splr(num_vars, &clauses, assumptions, deadline),
+        SatBackendKind::Varisat => solve_with_varisat(num_vars, &clauses, assumptions, deadline),
+        SatBackendKind::Dpll => {
+            DpllSolver::new(num_vars, clauses.clone(), deadline).solve(assumptions)
+        }
+    };
+    if let SatResult::Sat(assignment) = &result {
+        if !sat_assignment_satisfies(&clauses, assumptions, assignment) {
+            return SatResult::Unknown("SAT backend returned invalid assignment".to_owned());
+        }
     }
+    result
 }
 
 fn solve_with_varisat(
     num_vars: usize,
-    clauses: Vec<Vec<i32>>,
+    clauses: &[Vec<i32>],
     assumptions: &[i32],
     deadline: Option<Instant>,
 ) -> SatResult {
@@ -42,7 +50,7 @@ fn solve_with_varisat(
 
     let mut formula = varisat::CnfFormula::new();
     formula.set_var_count(num_vars);
-    for clause in &clauses {
+    for clause in clauses {
         let lits = clause
             .iter()
             .map(|&lit| varisat::Lit::from_dimacs(lit as isize))
@@ -78,7 +86,7 @@ fn solve_with_varisat(
 
 fn solve_with_splr(
     num_vars: usize,
-    clauses: Vec<Vec<i32>>,
+    clauses: &[Vec<i32>],
     assumptions: &[i32],
     deadline: Option<Instant>,
 ) -> SatResult {
@@ -92,10 +100,11 @@ fn solve_with_splr(
 
 fn solve_with_splr_inner(
     num_vars: usize,
-    mut clauses: Vec<Vec<i32>>,
+    clauses: &[Vec<i32>],
     assumptions: &[i32],
     deadline: Option<Instant>,
 ) -> SatResult {
+    let mut clauses = clauses.to_vec();
     for &assumption in assumptions {
         clauses.push(vec![assumption]);
     }
@@ -151,6 +160,32 @@ fn solve_with_splr_inner(
         | Err(Err(splr::SolverError::RootLevelConflict(_))) => SatResult::Unsat,
         Err(Err(splr::SolverError::TimeOut)) => SatResult::Unknown("budget exhausted".to_owned()),
         Err(Err(err)) => SatResult::Unknown(format!("splr error: {err}")),
+    }
+}
+
+fn sat_assignment_satisfies(
+    clauses: &[Vec<i32>],
+    assumptions: &[i32],
+    assignment: &[bool],
+) -> bool {
+    assumptions
+        .iter()
+        .all(|&lit| lit_is_satisfied(assignment, lit))
+        && clauses
+            .iter()
+            .all(|clause| clause.iter().any(|&lit| lit_is_satisfied(assignment, lit)))
+}
+
+fn lit_is_satisfied(assignment: &[bool], lit: i32) -> bool {
+    let var = lit.unsigned_abs() as usize;
+    if var == 0 || var > assignment.len() {
+        return false;
+    }
+    let value = assignment[var - 1];
+    if lit > 0 {
+        value
+    } else {
+        !value
     }
 }
 
@@ -304,4 +339,18 @@ fn assign_lit(assignment: &mut [Option<bool>], lit: i32) -> Result<(), ()> {
 fn lit_value(assignment: &[Option<bool>], lit: i32) -> Option<bool> {
     let var = lit.unsigned_abs() as usize;
     assignment[var].map(|value| if lit > 0 { value } else { !value })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sat_assignment_validation_checks_clauses_and_assumptions() {
+        let clauses = vec![vec![1, -2], vec![2]];
+        assert!(sat_assignment_satisfies(&clauses, &[1], &[true, true]));
+        assert!(!sat_assignment_satisfies(&clauses, &[-1], &[true, true]));
+        assert!(!sat_assignment_satisfies(&clauses, &[1], &[false, true]));
+        assert!(!sat_assignment_satisfies(&[vec![3]], &[], &[true, true]));
+    }
 }

@@ -1567,22 +1567,7 @@ impl Builder {
                 }
                 _ => None,
             },
-            NodeKind::BvIte {
-                then_value,
-                else_value,
-                ..
-            } => match (
-                self.possible_bit_mask_bytes(*then_value, width, depth + 1)?,
-                self.possible_bit_mask_bytes(*else_value, width, depth + 1)?,
-            ) {
-                (Some(mut then_mask), Some(else_mask)) => {
-                    for (then_mask, else_mask) in then_mask.iter_mut().zip(else_mask) {
-                        *then_mask |= else_mask;
-                    }
-                    Some(then_mask)
-                }
-                _ => None,
-            },
+            NodeKind::BvIte { .. } => None,
             _ => None,
         })
     }

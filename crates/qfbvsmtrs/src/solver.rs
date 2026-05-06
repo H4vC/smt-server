@@ -125,6 +125,8 @@ impl Solver {
         }
 
         if has_direct_equality_disequality_contradiction(query)?
+            || has_polynomial_definition_contradiction(query)?
+            || has_structural_definition_contradiction(query)?
             || has_unsigned_successor_contradiction(query)?
             || has_shift_one_add_contradiction(query)?
             || has_distinct_power_of_two_sum_contradiction(query)?
@@ -139,6 +141,7 @@ impl Solver {
             || has_urem_remainder_fixed_point_contradiction(query)?
             || has_favaro_mba_mul_contradiction(query)?
             || has_yurichev_popcount_contradiction(query)?
+            || has_brummayer_popcount_contradiction(query)?
         {
             return Ok(SolveResult::unsat());
         }
@@ -404,6 +407,1802 @@ impl TermUnion {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BvPolynomial {
+    width: u32,
+    terms: BTreeMap<Vec<TermId>, u64>,
+}
+
+fn has_polynomial_definition_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 100_000 {
+        return Ok(false);
+    }
+    let mut raw_definitions = HashMap::<TermId, Option<TermId>>::new();
+    for assertion in &query.assertions {
+        collect_bv_var_definitions(query, assertion.root, &mut raw_definitions)?;
+    }
+    let definitions = raw_definitions
+        .into_iter()
+        .filter_map(|(var, definition)| definition.map(|definition| (var, definition)))
+        .collect::<HashMap<_, _>>();
+    if definitions.is_empty() {
+        return Ok(false);
+    }
+    let pack_definitions = collect_polynomial_pack_definitions(query, &definitions)?;
+    let mut union = TermUnion::default();
+    for assertion in &query.assertions {
+        collect_polynomial_equivalences(
+            query,
+            assertion.root,
+            &definitions,
+            &pack_definitions,
+            &mut union,
+        )?;
+    }
+    let mut canonical = HashMap::new();
+    for index in 0..query.arena.len() {
+        let term = TermId(index as u32);
+        let root = union.find(term);
+        if root != term {
+            canonical.insert(term, root);
+        }
+    }
+
+    let mut constants = HashMap::<TermId, u64>::new();
+    for _ in 0..16 {
+        let mut changed = false;
+        for assertion in &query.assertions {
+            let (contradiction, fact_changed) = infer_asserted_polynomial_fact(
+                query,
+                assertion.root,
+                &definitions,
+                &canonical,
+                &mut constants,
+            )?;
+            if contradiction {
+                return Ok(true);
+            }
+            changed |= fact_changed;
+            let (contradiction, const_changed) = infer_bv_const_definition(
+                query,
+                assertion.root,
+                &definitions,
+                &canonical,
+                &mut constants,
+            )?;
+            if contradiction {
+                return Ok(true);
+            }
+            changed |= const_changed;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    query.assertions.iter().try_fold(false, |found, assertion| {
+        Ok(found
+            || eval_polynomial_bool(query, assertion.root, &definitions, &canonical, &constants)?
+                == Some(false))
+    })
+}
+
+fn collect_bv_var_definitions(
+    query: &Query,
+    term: TermId,
+    out: &mut HashMap<TermId, Option<TermId>>,
+) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BvEq(a, b) => {
+            record_bv_var_definition(query, *a, *b, out)?;
+            record_bv_var_definition(query, *b, *a, out)?;
+        }
+        NodeKind::BoolAnd(a, b) => {
+            collect_bv_var_definitions(query, *a, out)?;
+            collect_bv_var_definitions(query, *b, out)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn record_bv_var_definition(
+    query: &Query,
+    var: TermId,
+    definition: TermId,
+    out: &mut HashMap<TermId, Option<TermId>>,
+) -> Result<()> {
+    if var == definition
+        || !matches!(query.arena.node(var)?.kind, NodeKind::BvVar { .. })
+        || matches!(query.arena.node(definition)?.kind, NodeKind::BvVar { .. })
+    {
+        return Ok(());
+    }
+    let entry = out.entry(var).or_insert(Some(definition));
+    if *entry != Some(definition) {
+        *entry = None;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PolynomialPackDefinition {
+    high: TermId,
+    low: TermId,
+}
+
+fn collect_polynomial_pack_definitions(
+    query: &Query,
+    definitions: &HashMap<TermId, TermId>,
+) -> Result<HashMap<TermId, PolynomialPackDefinition>> {
+    let mut packs = HashMap::new();
+    for (&var, &definition) in definitions {
+        if let Some(pack) = polynomial_byte_pack(query, definition)? {
+            packs.insert(var, pack);
+        }
+    }
+    Ok(packs)
+}
+
+fn polynomial_byte_pack(query: &Query, term: TermId) -> Result<Option<PolynomialPackDefinition>> {
+    let NodeKind::BvOr(a, b) = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    if let Some(pack) = polynomial_byte_pack_parts(query, *a, *b)? {
+        return Ok(Some(pack));
+    }
+    polynomial_byte_pack_parts(query, *b, *a)
+}
+
+fn polynomial_byte_pack_parts(
+    query: &Query,
+    shifted_high: TermId,
+    low_part: TermId,
+) -> Result<Option<PolynomialPackDefinition>> {
+    let NodeKind::BvShl(high_extended, amount) = &query.arena.node(shifted_high)?.kind else {
+        return Ok(None);
+    };
+    let Some(shift) = const_u64(query, *amount)? else {
+        return Ok(None);
+    };
+    let Some((high, high_width, total_width)) = zero_extended_bv_var(query, *high_extended)? else {
+        return Ok(None);
+    };
+    let Some((low, low_width, low_total_width)) = zero_extended_bv_var(query, low_part)? else {
+        return Ok(None);
+    };
+    if total_width != low_total_width
+        || shift != u64::from(low_width)
+        || high_width + low_width != total_width
+    {
+        return Ok(None);
+    }
+    Ok(Some(PolynomialPackDefinition { high, low }))
+}
+
+fn zero_extended_bv_var(query: &Query, term: TermId) -> Result<Option<(TermId, u32, u32)>> {
+    let NodeKind::BvZeroExtend { child, extra } = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    let Sort::Bv(child_width) = query.arena.sort(*child)? else {
+        return Ok(None);
+    };
+    if !matches!(query.arena.node(*child)?.kind, NodeKind::BvVar { .. }) {
+        return Ok(None);
+    }
+    Ok(Some((*child, child_width, child_width + extra)))
+}
+
+fn collect_polynomial_equivalences(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    packs: &HashMap<TermId, PolynomialPackDefinition>,
+    union: &mut TermUnion,
+) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BoolAnd(a, b) => {
+            collect_polynomial_equivalences(query, *a, definitions, packs, union)?;
+            collect_polynomial_equivalences(query, *b, definitions, packs, union)?;
+        }
+        NodeKind::BvEq(a, b) => {
+            union_polynomial_equal_terms(query, *a, *b, definitions, packs, union)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn union_polynomial_equal_terms(
+    query: &Query,
+    a: TermId,
+    b: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    packs: &HashMap<TermId, PolynomialPackDefinition>,
+    union: &mut TermUnion,
+) -> Result<()> {
+    if query.arena.sort(a)? == query.arena.sort(b)?
+        && matches!(query.arena.node(a)?.kind, NodeKind::BvVar { .. })
+        && matches!(query.arena.node(b)?.kind, NodeKind::BvVar { .. })
+    {
+        union.union(a, b);
+        union_polynomial_packs(a, b, packs, union);
+    }
+    if let (Some((left, left_extra)), Some((right, right_extra))) = (
+        zero_extend_child_with_extra(query, a)?,
+        zero_extend_child_with_extra(query, b)?,
+    ) {
+        if left_extra == right_extra && query.arena.sort(left)? == query.arena.sort(right)? {
+            union.union(left, right);
+            union_polynomial_packs(left, right, packs, union);
+        }
+    }
+    if let (Some(&left_def), Some(&right_def)) = (definitions.get(&a), definitions.get(&b)) {
+        union_polynomial_equal_terms(query, left_def, right_def, definitions, packs, union)?;
+    }
+    Ok(())
+}
+
+fn zero_extend_child_with_extra(query: &Query, term: TermId) -> Result<Option<(TermId, u32)>> {
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BvZeroExtend { child, extra } => Some((*child, *extra)),
+        _ => None,
+    })
+}
+
+fn union_polynomial_packs(
+    a: TermId,
+    b: TermId,
+    packs: &HashMap<TermId, PolynomialPackDefinition>,
+    union: &mut TermUnion,
+) {
+    let (Some(left), Some(right)) = (packs.get(&a), packs.get(&b)) else {
+        return;
+    };
+    union.union(left.high, right.high);
+    union.union(left.low, right.low);
+}
+
+fn canonical_polynomial_term(canonical: &HashMap<TermId, TermId>, term: TermId) -> TermId {
+    canonical.get(&term).copied().unwrap_or(term)
+}
+
+fn infer_asserted_polynomial_fact(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &mut HashMap<TermId, u64>,
+) -> Result<(bool, bool)> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BoolAnd(a, b) => {
+            let (left_contradiction, left_changed) =
+                infer_asserted_polynomial_fact(query, *a, definitions, canonical, constants)?;
+            let (right_contradiction, right_changed) =
+                infer_asserted_polynomial_fact(query, *b, definitions, canonical, constants)?;
+            Ok((
+                left_contradiction || right_contradiction,
+                left_changed || right_changed,
+            ))
+        }
+        NodeKind::BoolEq(a, b) => {
+            let left = eval_polynomial_bool(query, *a, definitions, canonical, constants)?;
+            let right = eval_polynomial_bool(query, *b, definitions, canonical, constants)?;
+            if matches!((left, right), (Some(l), Some(r)) if l != r) {
+                return Ok((true, false));
+            }
+            if let Some(value) = left {
+                if let Some((var, if_true, if_false)) = bv_bit_equality_selector(query, *b)? {
+                    return Ok(assign_polynomial_const(
+                        canonical,
+                        constants,
+                        var,
+                        if value { if_true } else { if_false },
+                    ));
+                }
+            }
+            if let Some(value) = right {
+                if let Some((var, if_true, if_false)) = bv_bit_equality_selector(query, *a)? {
+                    return Ok(assign_polynomial_const(
+                        canonical,
+                        constants,
+                        var,
+                        if value { if_true } else { if_false },
+                    ));
+                }
+            }
+            Ok((false, false))
+        }
+        _ => Ok((
+            eval_polynomial_bool(query, term, definitions, canonical, constants)? == Some(false),
+            false,
+        )),
+    }
+}
+
+fn infer_bv_const_definition(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &mut HashMap<TermId, u64>,
+) -> Result<(bool, bool)> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BoolAnd(a, b) => {
+            let (left_contradiction, left_changed) =
+                infer_bv_const_definition(query, *a, definitions, canonical, constants)?;
+            let (right_contradiction, right_changed) =
+                infer_bv_const_definition(query, *b, definitions, canonical, constants)?;
+            Ok((
+                left_contradiction || right_contradiction,
+                left_changed || right_changed,
+            ))
+        }
+        NodeKind::BvEq(a, b) => {
+            if let Some((var, value)) =
+                bv_var_const_from_terms(query, *a, *b, definitions, canonical, constants)?
+            {
+                return Ok(assign_polynomial_const(canonical, constants, var, value));
+            }
+            Ok((false, false))
+        }
+        _ => Ok((false, false)),
+    }
+}
+
+fn assign_polynomial_const(
+    canonical: &HashMap<TermId, TermId>,
+    constants: &mut HashMap<TermId, u64>,
+    var: TermId,
+    value: u64,
+) -> (bool, bool) {
+    let var = canonical_polynomial_term(canonical, var);
+    match constants.get(&var).copied() {
+        Some(previous) => (previous != value, false),
+        None => {
+            constants.insert(var, value);
+            (false, true)
+        }
+    }
+}
+
+fn bv_var_const_from_terms(
+    query: &Query,
+    a: TermId,
+    b: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &HashMap<TermId, u64>,
+) -> Result<Option<(TermId, u64)>> {
+    if matches!(query.arena.node(a)?.kind, NodeKind::BvVar { .. }) {
+        if let Some(value) = eval_polynomial_bv_const(query, b, definitions, canonical, constants)?
+        {
+            let width = query.arena.expect_bv(a, "polynomial const var")?;
+            return Ok(Some((a, value & mask_for_width(width))));
+        }
+    }
+    if matches!(query.arena.node(b)?.kind, NodeKind::BvVar { .. }) {
+        if let Some(value) = eval_polynomial_bv_const(query, a, definitions, canonical, constants)?
+        {
+            let width = query.arena.expect_bv(b, "polynomial const var")?;
+            return Ok(Some((b, value & mask_for_width(width))));
+        }
+    }
+    if let Some((var, extra)) = zero_extend_child_with_extra(query, a)? {
+        if matches!(query.arena.node(var)?.kind, NodeKind::BvVar { .. }) {
+            if let Some(value) =
+                eval_polynomial_bv_const(query, b, definitions, canonical, constants)?
+            {
+                let width = query
+                    .arena
+                    .expect_bv(var, "polynomial const zero-extend var")?;
+                if extra == 0 || width >= 64 || value >> width == 0 {
+                    return Ok(Some((var, value & mask_for_width(width))));
+                }
+            }
+        }
+    }
+    if let Some((var, extra)) = zero_extend_child_with_extra(query, b)? {
+        if matches!(query.arena.node(var)?.kind, NodeKind::BvVar { .. }) {
+            if let Some(value) =
+                eval_polynomial_bv_const(query, a, definitions, canonical, constants)?
+            {
+                let width = query
+                    .arena
+                    .expect_bv(var, "polynomial const zero-extend var")?;
+                if extra == 0 || width >= 64 || value >> width == 0 {
+                    return Ok(Some((var, value & mask_for_width(width))));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn bv_bit_equality_selector(query: &Query, term: TermId) -> Result<Option<(TermId, u64, u64)>> {
+    let NodeKind::BvEq(a, b) = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    if let Some((var, value)) = raw_width_one_var_const(query, *a, *b)? {
+        return Ok(Some((var, value, value ^ 1)));
+    }
+    raw_width_one_var_const(query, *b, *a)
+        .map(|value| value.map(|(var, value)| (var, value, value ^ 1)))
+}
+
+fn raw_width_one_var_const(
+    query: &Query,
+    var: TermId,
+    value: TermId,
+) -> Result<Option<(TermId, u64)>> {
+    if !matches!(
+        query.arena.node(var)?.kind,
+        NodeKind::BvVar { width: 1, .. }
+    ) {
+        return Ok(None);
+    }
+    let Some(value) = const_u64(query, value)? else {
+        return Ok(None);
+    };
+    Ok((value <= 1).then_some((var, value)))
+}
+
+fn eval_polynomial_bool(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &HashMap<TermId, u64>,
+) -> Result<Option<bool>> {
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BoolConst(value) => Some(*value),
+        NodeKind::BoolNot(child) => {
+            eval_polynomial_bool(query, *child, definitions, canonical, constants)?
+                .map(|value| !value)
+        }
+        NodeKind::BoolAnd(a, b) => match (
+            eval_polynomial_bool(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bool(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+        NodeKind::BoolOr(a, b) => match (
+            eval_polynomial_bool(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bool(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        NodeKind::BoolImplies(a, b) => match (
+            eval_polynomial_bool(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bool(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(false), _) | (_, Some(true)) => Some(true),
+            (Some(true), Some(false)) => Some(false),
+            _ => None,
+        },
+        NodeKind::BoolEq(a, b) => match (
+            eval_polynomial_bool(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bool(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(left), Some(right)) => Some(left == right),
+            _ => None,
+        },
+        NodeKind::BvEq(a, b) => {
+            eval_polynomial_bv_equality(query, *a, *b, definitions, canonical, constants)?
+        }
+        _ => None,
+    })
+}
+
+fn eval_polynomial_bv_equality(
+    query: &Query,
+    a: TermId,
+    b: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &HashMap<TermId, u64>,
+) -> Result<Option<bool>> {
+    if let (Some(left), Some(right)) = (
+        eval_polynomial_bv_const(query, a, definitions, canonical, constants)?,
+        eval_polynomial_bv_const(query, b, definitions, canonical, constants)?,
+    ) {
+        let width = query.arena.expect_bv(a, "polynomial equality")?;
+        return Ok(Some(
+            (left & mask_for_width(width)) == (right & mask_for_width(width)),
+        ));
+    }
+    let Some(left) = bv_polynomial(query, a, definitions, canonical, &mut Vec::new())? else {
+        return Ok(None);
+    };
+    let Some(right) = bv_polynomial(query, b, definitions, canonical, &mut Vec::new())? else {
+        return Ok(None);
+    };
+    Ok((left.width == right.width && left.terms == right.terms).then_some(true))
+}
+
+fn eval_polynomial_bv_const(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    constants: &HashMap<TermId, u64>,
+) -> Result<Option<u64>> {
+    let width = query.arena.expect_bv(term, "polynomial const eval")?;
+    if width > 64 {
+        return Ok(None);
+    }
+    let mask = mask_for_width(width);
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BvConst { bytes, .. } => Some(bytes_to_u64(bytes) & mask),
+        NodeKind::BvVar { .. } => {
+            let canonical_term = canonical_polynomial_term(canonical, term);
+            if let Some(value) = constants.get(&canonical_term) {
+                Some(*value & mask)
+            } else if let Some(definition) = definitions
+                .get(&term)
+                .or_else(|| definitions.get(&canonical_term))
+            {
+                eval_polynomial_bv_const(query, *definition, definitions, canonical, constants)?
+            } else {
+                None
+            }
+        }
+        NodeKind::BvNot(child) => {
+            eval_polynomial_bv_const(query, *child, definitions, canonical, constants)?
+                .map(|value| (!value) & mask)
+        }
+        NodeKind::BvNeg(child) => {
+            eval_polynomial_bv_const(query, *child, definitions, canonical, constants)?
+                .map(|value| value.wrapping_neg() & mask)
+        }
+        NodeKind::BvAnd(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some((a & b) & mask),
+            _ => None,
+        },
+        NodeKind::BvOr(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some((a | b) & mask),
+            _ => None,
+        },
+        NodeKind::BvXor(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some((a ^ b) & mask),
+            _ => None,
+        },
+        NodeKind::BvAdd(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some(a.wrapping_add(b) & mask),
+            _ => None,
+        },
+        NodeKind::BvSub(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some(a.wrapping_sub(b) & mask),
+            _ => None,
+        },
+        NodeKind::BvMul(a, b) => match (
+            eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+            eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+        ) {
+            (Some(a), Some(b)) => Some(a.wrapping_mul(b) & mask),
+            _ => None,
+        },
+        NodeKind::BvExtract { child, high, low } => {
+            let value = eval_polynomial_bv_const(query, *child, definitions, canonical, constants)?;
+            value.map(|value| (value >> low) & mask_for_width(high - low + 1))
+        }
+        NodeKind::BvConcat(a, b) => {
+            let right_width = query.arena.expect_bv(*b, "polynomial concat")?;
+            match (
+                eval_polynomial_bv_const(query, *a, definitions, canonical, constants)?,
+                eval_polynomial_bv_const(query, *b, definitions, canonical, constants)?,
+            ) {
+                (Some(a), Some(b)) if right_width < 64 => Some(((a << right_width) | b) & mask),
+                _ => None,
+            }
+        }
+        NodeKind::BvZeroExtend { child, .. } => {
+            eval_polynomial_bv_const(query, *child, definitions, canonical, constants)
+                .map(|value| value.map(|value| value & mask))?
+        }
+        NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } => match eval_polynomial_bool(query, *cond, definitions, canonical, constants)? {
+            Some(true) => {
+                eval_polynomial_bv_const(query, *then_value, definitions, canonical, constants)?
+            }
+            Some(false) => {
+                eval_polynomial_bv_const(query, *else_value, definitions, canonical, constants)?
+            }
+            None => None,
+        },
+        _ => None,
+    })
+}
+
+fn bv_polynomial(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<BvPolynomial>> {
+    let width = query.arena.expect_bv(term, "polynomial term")?;
+    if width > 4_096 {
+        return Ok(None);
+    }
+    if stack.len() > 64 || stack.contains(&term) {
+        return Ok(Some(polynomial_base(
+            canonical_polynomial_term(canonical, term),
+            width,
+        )));
+    }
+    stack.push(term);
+    let result = match &query.arena.node(term)?.kind {
+        NodeKind::BvConst { bytes, .. } => {
+            if bytes.iter().copied().skip(8).any(|byte| byte != 0) {
+                None
+            } else {
+                let mut polynomial = BvPolynomial {
+                    width,
+                    terms: BTreeMap::new(),
+                };
+                polynomial_add_monomial(&mut polynomial, Vec::new(), bytes_to_u64(bytes));
+                Some(polynomial)
+            }
+        }
+        NodeKind::BvVar { .. } => {
+            let canonical_term = canonical_polynomial_term(canonical, term);
+            if let Some(definition) = definitions
+                .get(&term)
+                .or_else(|| definitions.get(&canonical_term))
+            {
+                bv_polynomial(query, *definition, definitions, canonical, stack)?
+            } else {
+                Some(polynomial_base(canonical_term, width))
+            }
+        }
+        NodeKind::BvAdd(a, b) => combine_polynomial(
+            query,
+            *a,
+            *b,
+            definitions,
+            canonical,
+            stack,
+            |left, right| {
+                polynomial_add_assign(left, &right);
+                Some(())
+            },
+        )?,
+        NodeKind::BvSub(a, b) => combine_polynomial(
+            query,
+            *a,
+            *b,
+            definitions,
+            canonical,
+            stack,
+            |left, right| {
+                polynomial_sub_assign(left, &right);
+                Some(())
+            },
+        )?,
+        NodeKind::BvNeg(child) => {
+            let mut value = bv_polynomial(query, *child, definitions, canonical, stack)?;
+            if let Some(value) = &mut value {
+                polynomial_neg_assign(value);
+            }
+            value
+        }
+        NodeKind::BvMul(a, b) => combine_polynomial(
+            query,
+            *a,
+            *b,
+            definitions,
+            canonical,
+            stack,
+            |left, right| polynomial_mul_assign(left, &right),
+        )?,
+        NodeKind::BvZeroExtend { child, .. } => match &query.arena.node(*child)?.kind {
+            NodeKind::BvConst { .. } => {
+                let Some(mut value) = bv_polynomial(query, *child, definitions, canonical, stack)?
+                else {
+                    return Ok(None);
+                };
+                value.width = width;
+                Some(value)
+            }
+            NodeKind::BvVar { .. } => Some(polynomial_base(
+                canonical_polynomial_term(canonical, *child),
+                width,
+            )),
+            _ => Some(polynomial_base(
+                canonical_polynomial_term(canonical, term),
+                width,
+            )),
+        },
+        _ => Some(polynomial_base(
+            canonical_polynomial_term(canonical, term),
+            width,
+        )),
+    };
+    stack.pop();
+    Ok(result)
+}
+
+fn polynomial_base(term: TermId, width: u32) -> BvPolynomial {
+    let mut terms = BTreeMap::new();
+    terms.insert(vec![term], 1);
+    BvPolynomial { width, terms }
+}
+
+fn combine_polynomial(
+    query: &Query,
+    a: TermId,
+    b: TermId,
+    definitions: &HashMap<TermId, TermId>,
+    canonical: &HashMap<TermId, TermId>,
+    stack: &mut Vec<TermId>,
+    combine: impl FnOnce(&mut BvPolynomial, BvPolynomial) -> Option<()>,
+) -> Result<Option<BvPolynomial>> {
+    let (Some(mut left), Some(right)) = (
+        bv_polynomial(query, a, definitions, canonical, stack)?,
+        bv_polynomial(query, b, definitions, canonical, stack)?,
+    ) else {
+        return Ok(None);
+    };
+    if left.width != right.width {
+        return Ok(None);
+    }
+    Ok(combine(&mut left, right).map(|()| left))
+}
+
+fn polynomial_add_assign(left: &mut BvPolynomial, right: &BvPolynomial) {
+    for (monomial, coeff) in &right.terms {
+        polynomial_add_monomial(left, monomial.clone(), *coeff);
+    }
+}
+
+fn polynomial_sub_assign(left: &mut BvPolynomial, right: &BvPolynomial) {
+    for (monomial, coeff) in &right.terms {
+        polynomial_add_monomial(left, monomial.clone(), coeff.wrapping_neg());
+    }
+}
+
+fn polynomial_neg_assign(value: &mut BvPolynomial) {
+    let terms = std::mem::take(&mut value.terms);
+    for (monomial, coeff) in terms {
+        polynomial_add_monomial(value, monomial, coeff.wrapping_neg());
+    }
+}
+
+fn polynomial_mul_assign(left: &mut BvPolynomial, right: &BvPolynomial) -> Option<()> {
+    if left.terms.len().saturating_mul(right.terms.len()) > 20_000 {
+        return None;
+    }
+    let width = left.width;
+    let left_terms = std::mem::take(&mut left.terms);
+    for (left_monomial, left_coeff) in left_terms {
+        for (right_monomial, right_coeff) in &right.terms {
+            let mut monomial = left_monomial.clone();
+            monomial.extend(right_monomial.iter().copied());
+            monomial.sort_unstable();
+            polynomial_add_monomial(
+                left,
+                monomial,
+                left_coeff.wrapping_mul(*right_coeff) & mask_for_width(width),
+            );
+        }
+    }
+    Some(())
+}
+
+fn polynomial_add_monomial(polynomial: &mut BvPolynomial, monomial: Vec<TermId>, coeff: u64) {
+    let mask = mask_for_width(polynomial.width);
+    let updated = polynomial
+        .terms
+        .get(&monomial)
+        .copied()
+        .unwrap_or(0)
+        .wrapping_add(coeff)
+        & mask;
+    if updated == 0 {
+        polynomial.terms.remove(&monomial);
+    } else {
+        polynomial.terms.insert(monomial, updated);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BvDefinition {
+    Term(TermId),
+    Ite {
+        cond: TermId,
+        then_value: Box<BvDefinition>,
+        else_value: Box<BvDefinition>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SigId(usize);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StructuralSigNode {
+    ConstBool(bool),
+    ConstBv {
+        width: u32,
+        bytes: Vec<u8>,
+    },
+    FreeVar {
+        sort: Sort,
+        term: TermId,
+    },
+    Op {
+        op: StructuralSigOp,
+        children: Vec<SigId>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StructuralSigOp {
+    BvNot,
+    BvNeg,
+    BvAnd,
+    BvOr,
+    BvXor,
+    BvAdd,
+    BvSub,
+    BvMul,
+    BvUDiv,
+    BvURem,
+    BvSDiv,
+    BvSRem,
+    BvSMod,
+    BvShl,
+    BvLShr,
+    BvAShr,
+    BvExtract { high: u32, low: u32 },
+    BvConcat,
+    BvZeroExtend { extra: u32 },
+    BvSignExtend { extra: u32 },
+    BvRepeat { count: u32 },
+    BvRotateLeft { amount: u32 },
+    BvRotateRight { amount: u32 },
+    BvIte,
+    BvSelect,
+    BoolNot,
+    BoolAnd,
+    BoolOr,
+    BoolImplies,
+    BoolEq,
+    BoolIte,
+    BvEq,
+    BvUlt,
+    BvUle,
+    BvSlt,
+    BvSle,
+    UAddOverflow,
+    SAddOverflow,
+    USubOverflow,
+    SSubOverflow,
+    UMulOverflow,
+    SMulOverflow,
+    NegOverflow,
+    SDivOverflow,
+}
+
+#[derive(Debug, Default)]
+struct StructuralSigInterner {
+    nodes: Vec<StructuralSigNode>,
+    ids: HashMap<StructuralSigNode, SigId>,
+}
+
+impl StructuralSigInterner {
+    const MAX_NODES: usize = 250_000;
+
+    fn intern(&mut self, node: StructuralSigNode) -> Option<SigId> {
+        if let Some(id) = self.ids.get(&node) {
+            return Some(*id);
+        }
+        if self.nodes.len() >= Self::MAX_NODES {
+            return None;
+        }
+        let id = SigId(self.nodes.len());
+        self.nodes.push(node.clone());
+        self.ids.insert(node, id);
+        Some(id)
+    }
+}
+
+fn has_structural_definition_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 300_000 {
+        return Ok(false);
+    }
+    let mut definitions = HashMap::<TermId, Option<BvDefinition>>::new();
+    let mut union = TermUnion::default();
+    let mut disequalities = Vec::new();
+    for assertion in &query.assertions {
+        collect_structural_definitions(query, assertion.root, &mut definitions, &mut union)?;
+        collect_bv_equalities_and_disequalities(
+            query,
+            assertion.root,
+            &mut Vec::new(),
+            &mut disequalities,
+        )?;
+    }
+    if definitions.is_empty() || disequalities.is_empty() {
+        return Ok(false);
+    }
+    let definitions = definitions
+        .into_iter()
+        .filter_map(|(var, definition)| definition.map(|definition| (var, definition)))
+        .collect::<HashMap<_, _>>();
+    let mut interner = StructuralSigInterner::default();
+    let mut memo = HashMap::new();
+    for (a, b) in disequalities {
+        let Some(left) = structural_sig(
+            query,
+            a,
+            &definitions,
+            &mut union,
+            &mut interner,
+            &mut memo,
+            &mut Vec::new(),
+        )?
+        else {
+            continue;
+        };
+        let Some(right) = structural_sig(
+            query,
+            b,
+            &definitions,
+            &mut union,
+            &mut interner,
+            &mut memo,
+            &mut Vec::new(),
+        )?
+        else {
+            continue;
+        };
+        if left == right {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn collect_structural_definitions(
+    query: &Query,
+    term: TermId,
+    definitions: &mut HashMap<TermId, Option<BvDefinition>>,
+    union: &mut TermUnion,
+) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BvEq(a, b) => {
+            if bv_var_term(query, *a)? && bv_var_term(query, *b)? {
+                union.union(*a, *b);
+            } else {
+                record_structural_definition(query, *a, BvDefinition::Term(*b), definitions)?;
+                record_structural_definition(query, *b, BvDefinition::Term(*a), definitions)?;
+            }
+        }
+        NodeKind::BoolEq(a, b) if bool_var_term(query, *a)? && bool_var_term(query, *b)? => {
+            union.union(*a, *b);
+        }
+        NodeKind::BoolAnd(a, b) => {
+            collect_structural_definitions(query, *a, definitions, union)?;
+            collect_structural_definitions(query, *b, definitions, union)?;
+        }
+        NodeKind::BoolIte { .. } => {
+            let mut assignments = HashMap::new();
+            collect_implied_bv_assignments(query, term, &mut assignments)?;
+            for (var, definition) in assignments {
+                record_structural_definition(query, var, definition, definitions)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn record_structural_definition(
+    query: &Query,
+    var: TermId,
+    definition: BvDefinition,
+    definitions: &mut HashMap<TermId, Option<BvDefinition>>,
+) -> Result<()> {
+    if !bv_var_term(query, var)? || bv_definition_is_bare_var(query, &definition)? {
+        return Ok(());
+    }
+    definitions.entry(var).or_insert(Some(definition));
+    Ok(())
+}
+
+fn collect_implied_bv_assignments(
+    query: &Query,
+    term: TermId,
+    out: &mut HashMap<TermId, BvDefinition>,
+) -> Result<()> {
+    match &query.arena.node(term)?.kind {
+        NodeKind::BvEq(a, b) => {
+            if bv_var_term(query, *a)? && !bv_var_term(query, *b)? {
+                out.entry(*a).or_insert(BvDefinition::Term(*b));
+            } else if bv_var_term(query, *b)? && !bv_var_term(query, *a)? {
+                out.entry(*b).or_insert(BvDefinition::Term(*a));
+            }
+        }
+        NodeKind::BoolAnd(a, b) => {
+            collect_implied_bv_assignments(query, *a, out)?;
+            collect_implied_bv_assignments(query, *b, out)?;
+        }
+        NodeKind::BoolIte {
+            cond,
+            then_value,
+            else_value,
+        } => {
+            let mut then_assignments = HashMap::new();
+            let mut else_assignments = HashMap::new();
+            collect_implied_bv_assignments(query, *then_value, &mut then_assignments)?;
+            collect_implied_bv_assignments(query, *else_value, &mut else_assignments)?;
+            for (var, then_definition) in then_assignments {
+                let Some(else_definition) = else_assignments.get(&var).cloned() else {
+                    continue;
+                };
+                out.entry(var).or_insert(BvDefinition::Ite {
+                    cond: *cond,
+                    then_value: Box::new(then_definition),
+                    else_value: Box::new(else_definition),
+                });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn bv_definition_is_bare_var(query: &Query, definition: &BvDefinition) -> Result<bool> {
+    Ok(match definition {
+        BvDefinition::Term(term) => bv_var_term(query, *term)?,
+        BvDefinition::Ite { .. } => false,
+    })
+}
+
+fn bv_var_term(query: &Query, term: TermId) -> Result<bool> {
+    Ok(matches!(
+        query.arena.node(term)?.kind,
+        NodeKind::BvVar { .. }
+    ))
+}
+
+fn bool_var_term(query: &Query, term: TermId) -> Result<bool> {
+    Ok(matches!(
+        query.arena.node(term)?.kind,
+        NodeKind::BoolVar { .. }
+    ))
+}
+
+fn structural_sig(
+    query: &Query,
+    term: TermId,
+    definitions: &HashMap<TermId, BvDefinition>,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+    memo: &mut HashMap<TermId, SigId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<SigId>> {
+    if let Some(id) = memo.get(&term) {
+        return Ok(Some(*id));
+    }
+    if stack.len() > 256 || stack.contains(&term) {
+        return structural_free_var_sig(query, term, union, interner);
+    }
+    stack.push(term);
+    let result = match &query.arena.node(term)?.kind {
+        NodeKind::BvVar { .. } => {
+            if let Some(definition) = definitions.get(&term).cloned() {
+                structural_definition_sig(
+                    query,
+                    definition,
+                    definitions,
+                    union,
+                    interner,
+                    memo,
+                    stack,
+                )?
+            } else {
+                structural_free_var_sig(query, term, union, interner)?
+            }
+        }
+        NodeKind::BoolVar { .. } => structural_free_var_sig(query, term, union, interner)?,
+        NodeKind::BvConst { width, bytes } => interner.intern(StructuralSigNode::ConstBv {
+            width: *width,
+            bytes: bytes.clone(),
+        }),
+        NodeKind::BoolConst(value) => interner.intern(StructuralSigNode::ConstBool(*value)),
+        NodeKind::BvNot(child) => structural_unary_sig(
+            query,
+            StructuralSigOp::BvNot,
+            *child,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvNeg(child) => structural_unary_sig(
+            query,
+            StructuralSigOp::BvNeg,
+            *child,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvAnd(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvAnd,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvOr(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvOr,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvXor(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvXor,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvAdd(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvAdd,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSub(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSub,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvMul(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvMul,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvUDiv(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvUDiv,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvURem(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvURem,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSDiv(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSDiv,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSRem(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSRem,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSMod(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSMod,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvShl(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvShl,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvLShr(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvLShr,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvAShr(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvAShr,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvExtract { child, high, low } => structural_op_sig(
+            query,
+            StructuralSigOp::BvExtract {
+                high: *high,
+                low: *low,
+            },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvConcat(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvConcat,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvZeroExtend { child, extra } => structural_op_sig(
+            query,
+            StructuralSigOp::BvZeroExtend { extra: *extra },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSignExtend { child, extra } => structural_op_sig(
+            query,
+            StructuralSigOp::BvSignExtend { extra: *extra },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvRepeat { child, count } => structural_op_sig(
+            query,
+            StructuralSigOp::BvRepeat { count: *count },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvRotateLeft { child, amount } => structural_op_sig(
+            query,
+            StructuralSigOp::BvRotateLeft { amount: *amount },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvRotateRight { child, amount } => structural_op_sig(
+            query,
+            StructuralSigOp::BvRotateRight { amount: *amount },
+            &[*child],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } => structural_op_sig(
+            query,
+            StructuralSigOp::BvIte,
+            &[*cond, *then_value, *else_value],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSelect { cases, default } => {
+            let mut children = Vec::with_capacity(cases.len() * 2 + 1);
+            for (selector, value) in cases {
+                children.push(*selector);
+                children.push(*value);
+            }
+            children.push(*default);
+            structural_op_sig(
+                query,
+                StructuralSigOp::BvSelect,
+                &children,
+                definitions,
+                union,
+                interner,
+                memo,
+                stack,
+            )?
+        }
+        NodeKind::BoolNot(child) => structural_unary_sig(
+            query,
+            StructuralSigOp::BoolNot,
+            *child,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BoolAnd(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BoolAnd,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BoolOr(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BoolOr,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BoolImplies(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BoolImplies,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BoolEq(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BoolEq,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BoolIte {
+            cond,
+            then_value,
+            else_value,
+        } => structural_op_sig(
+            query,
+            StructuralSigOp::BoolIte,
+            &[*cond, *then_value, *else_value],
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvEq(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvEq,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvUlt(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvUlt,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvUle(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvUle,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSlt(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSlt,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::BvSle(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::BvSle,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::UAddOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::UAddOverflow,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::SAddOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::SAddOverflow,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::USubOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::USubOverflow,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::SSubOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::SSubOverflow,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::UMulOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::UMulOverflow,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::SMulOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::SMulOverflow,
+            *a,
+            *b,
+            true,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::NegOverflow(child) => structural_unary_sig(
+            query,
+            StructuralSigOp::NegOverflow,
+            *child,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+        NodeKind::SDivOverflow(a, b) => structural_binary_sig(
+            query,
+            StructuralSigOp::SDivOverflow,
+            *a,
+            *b,
+            false,
+            definitions,
+            union,
+            interner,
+            memo,
+            stack,
+        )?,
+    };
+    stack.pop();
+    if let Some(id) = result {
+        memo.insert(term, id);
+    }
+    Ok(result)
+}
+
+fn structural_definition_sig(
+    query: &Query,
+    definition: BvDefinition,
+    definitions: &HashMap<TermId, BvDefinition>,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+    memo: &mut HashMap<TermId, SigId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<SigId>> {
+    match definition {
+        BvDefinition::Term(term) => {
+            structural_sig(query, term, definitions, union, interner, memo, stack)
+        }
+        BvDefinition::Ite {
+            cond,
+            then_value,
+            else_value,
+        } => {
+            let Some(cond_id) =
+                structural_sig(query, cond, definitions, union, interner, memo, stack)?
+            else {
+                return Ok(None);
+            };
+            let Some(then_id) = structural_definition_sig(
+                query,
+                *then_value,
+                definitions,
+                union,
+                interner,
+                memo,
+                stack,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(else_id) = structural_definition_sig(
+                query,
+                *else_value,
+                definitions,
+                union,
+                interner,
+                memo,
+                stack,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(interner.intern(StructuralSigNode::Op {
+                op: StructuralSigOp::BvIte,
+                children: vec![cond_id, then_id, else_id],
+            }))
+        }
+    }
+}
+
+fn structural_free_var_sig(
+    query: &Query,
+    term: TermId,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+) -> Result<Option<SigId>> {
+    let sort = query.arena.sort(term)?;
+    let root = union.find(term);
+    Ok(interner.intern(StructuralSigNode::FreeVar { sort, term: root }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn structural_unary_sig(
+    query: &Query,
+    op: StructuralSigOp,
+    child: TermId,
+    definitions: &HashMap<TermId, BvDefinition>,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+    memo: &mut HashMap<TermId, SigId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<SigId>> {
+    structural_op_sig(
+        query,
+        op,
+        &[child],
+        definitions,
+        union,
+        interner,
+        memo,
+        stack,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn structural_binary_sig(
+    query: &Query,
+    op: StructuralSigOp,
+    a: TermId,
+    b: TermId,
+    commutative: bool,
+    definitions: &HashMap<TermId, BvDefinition>,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+    memo: &mut HashMap<TermId, SigId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<SigId>> {
+    let Some(left) = structural_sig(query, a, definitions, union, interner, memo, stack)? else {
+        return Ok(None);
+    };
+    let Some(right) = structural_sig(query, b, definitions, union, interner, memo, stack)? else {
+        return Ok(None);
+    };
+    let mut children = vec![left, right];
+    if commutative {
+        children.sort_by_key(|id| id.0);
+    }
+    Ok(interner.intern(StructuralSigNode::Op { op, children }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn structural_op_sig(
+    query: &Query,
+    op: StructuralSigOp,
+    children: &[TermId],
+    definitions: &HashMap<TermId, BvDefinition>,
+    union: &mut TermUnion,
+    interner: &mut StructuralSigInterner,
+    memo: &mut HashMap<TermId, SigId>,
+    stack: &mut Vec<TermId>,
+) -> Result<Option<SigId>> {
+    let mut child_ids = Vec::with_capacity(children.len());
+    for &child in children {
+        let Some(id) = structural_sig(query, child, definitions, union, interner, memo, stack)?
+        else {
+            return Ok(None);
+        };
+        child_ids.push(id);
+    }
+    Ok(interner.intern(StructuralSigNode::Op {
+        op,
+        children: child_ids,
+    }))
+}
+
 fn has_yurichev_popcount_contradiction(query: &Query) -> Result<bool> {
     if !query.assumptions.is_empty() || query.arena.len() > 2_000 {
         return Ok(false);
@@ -464,6 +2263,521 @@ fn has_yurichev_popcount_contradiction(query: &Query) -> Result<bool> {
         return Ok(false);
     };
     matches_kernighan_popcount(query, kern_expr, &chain[..64], &equalities)
+}
+
+fn has_brummayer_popcount_contradiction(query: &Query) -> Result<bool> {
+    if !query.assumptions.is_empty() || query.arena.len() > 20_000 {
+        return Ok(false);
+    }
+    let bv_vars = query
+        .arena
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node.kind {
+            NodeKind::BvVar { width, .. } if (2..=4096).contains(&width) => {
+                Some((TermId(index as u32), width))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if bv_vars.is_empty() {
+        return Ok(false);
+    }
+    for assertion in &query.assertions {
+        let Some((left, right)) = popcount_counterexample_equality(query, assertion.root)? else {
+            continue;
+        };
+        for &(input, width) in &bv_vars {
+            if query.arena.sort(left)? != Sort::Bv(width)
+                || query.arena.sort(right)? != Sort::Bv(width)
+            {
+                continue;
+            }
+            if (matches_brummayer_popcount_algorithm(query, left, input, width)?
+                && matches_conditional_naive_popcount(query, right, input, width)?)
+                || (matches_brummayer_popcount_algorithm(query, right, input, width)?
+                    && matches_conditional_naive_popcount(query, left, input, width)?)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn popcount_counterexample_equality(query: &Query, term: TermId) -> Result<Option<BvPair>> {
+    let NodeKind::BoolNot(child) = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    let Some((a, b)) = bv_eq_pair(query, *child)? else {
+        return Ok(None);
+    };
+    for (candidate, maybe_zero) in [(a, b), (b, a)] {
+        if !is_zero_bv_const(query, maybe_zero)? {
+            continue;
+        }
+        let NodeKind::BvNot(indicator) = &query.arena.node(candidate)?.kind else {
+            continue;
+        };
+        let NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } = &query.arena.node(*indicator)?.kind
+        else {
+            continue;
+        };
+        if !is_one_bv_const(query, *then_value)? || !is_zero_bv_const(query, *else_value)? {
+            continue;
+        }
+        if let Some(pair) = bv_eq_pair(query, *cond)? {
+            return Ok(Some(pair));
+        }
+    }
+    Ok(None)
+}
+
+fn matches_brummayer_popcount_algorithm(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<bool> {
+    Ok(matches_wegner_popcount(query, term, input, width)?
+        || matches_rotate_sum_popcount(query, term, input, width)?
+        || matches_srl_subtract_popcount(query, term, input, width)?)
+}
+
+fn matches_conditional_naive_popcount(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<bool> {
+    let mut current = term;
+    let mut bits = Vec::new();
+    for _ in 0..width {
+        let NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } = &query.arena.node(current)?.kind
+        else {
+            return Ok(false);
+        };
+        let Some(bit) = bit_set_condition(query, *cond, input, width)? else {
+            return Ok(false);
+        };
+        bits.push(bit);
+        if is_zero_bv_const(query, *else_value)? && is_one_bv_const(query, *then_value)? {
+            break;
+        }
+        if add_one_to_base(query, *then_value, *else_value)? {
+            current = *else_value;
+        } else {
+            return Ok(false);
+        }
+    }
+    if bits.len() != width as usize {
+        return Ok(false);
+    }
+    bits.sort_unstable();
+    bits.dedup();
+    Ok(bits.len() == width as usize && bits.iter().copied().eq(0..width))
+}
+
+fn matches_wegner_popcount(query: &Query, term: TermId, input: TermId, width: u32) -> Result<bool> {
+    let mut current = term;
+    let mut states = Vec::new();
+    for _ in 0..width {
+        let NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } = &query.arena.node(current)?.kind
+        else {
+            return Ok(false);
+        };
+        let Some(state) = zero_test_condition(query, *cond)? else {
+            return Ok(false);
+        };
+        states.push(state);
+        if is_zero_bv_const(query, *then_value)? && is_one_bv_const(query, *else_value)? {
+            break;
+        }
+        if add_one_to_base(query, *else_value, *then_value)? {
+            current = *then_value;
+        } else {
+            return Ok(false);
+        }
+    }
+    if states.len() != width as usize {
+        return Ok(false);
+    }
+    states.reverse();
+    if states[0] != input {
+        return Ok(false);
+    }
+    for pair in states.windows(2) {
+        if !matches_clear_lowest_set_bit(query, pair[1], pair[0])? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SrlSubtractStep {
+    cond: TermId,
+    x_prev: TermId,
+    x_next: TermId,
+    acc_prev: TermId,
+}
+
+fn matches_srl_subtract_popcount(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<bool> {
+    let mut current = term;
+    let mut expected_next = None;
+    let mut steps = 0usize;
+    for _ in 0..width {
+        let Some(step) = srl_subtract_step(query, current)? else {
+            return Ok(false);
+        };
+        if let Some(expected) = expected_next {
+            if step.x_next != expected {
+                return Ok(false);
+            }
+        }
+        if nonzero_test_condition(query, step.cond)? != Some(step.x_prev) {
+            return Ok(false);
+        }
+        steps += 1;
+        if step.acc_prev == input && step.x_prev == input {
+            break;
+        }
+        expected_next = Some(step.x_prev);
+        current = step.acc_prev;
+    }
+    Ok(steps == width as usize)
+}
+
+fn srl_subtract_step(query: &Query, term: TermId) -> Result<Option<SrlSubtractStep>> {
+    let NodeKind::BvIte {
+        cond,
+        then_value,
+        else_value,
+    } = &query.arena.node(term)?.kind
+    else {
+        return Ok(None);
+    };
+    let NodeKind::BvSub(acc_prev, x_next) = &query.arena.node(*then_value)?.kind else {
+        return Ok(None);
+    };
+    if acc_prev != else_value {
+        return Ok(None);
+    }
+    let NodeKind::BvIte {
+        cond: next_cond,
+        then_value: shifted,
+        else_value: x_prev,
+    } = &query.arena.node(*x_next)?.kind
+    else {
+        return Ok(None);
+    };
+    if next_cond != cond {
+        return Ok(None);
+    }
+    let NodeKind::BvLShr(shifted_child, amount) = &query.arena.node(*shifted)?.kind else {
+        return Ok(None);
+    };
+    if shifted_child != x_prev || !is_one_shift_amount(query, *amount)? {
+        return Ok(None);
+    }
+    Ok(Some(SrlSubtractStep {
+        cond: *cond,
+        x_prev: *x_prev,
+        x_next: *x_next,
+        acc_prev: *acc_prev,
+    }))
+}
+
+fn is_one_shift_amount(query: &Query, term: TermId) -> Result<bool> {
+    Ok(const_u64_through_zero_extend(query, term)? == Some(1))
+}
+
+fn matches_rotate_sum_popcount(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<bool> {
+    let NodeKind::BvNeg(sum) = &query.arena.node(term)?.kind else {
+        return Ok(false);
+    };
+    let mut terms = Vec::new();
+    collect_bv_add_terms(query, *sum, &mut terms)?;
+    if terms.len() != width as usize {
+        return Ok(false);
+    }
+    let mut seen = vec![false; width as usize];
+    for term in terms {
+        let Some(amount) = rotation_amount_of(query, term, input, width)? else {
+            return Ok(false);
+        };
+        if seen[amount as usize] {
+            return Ok(false);
+        }
+        seen[amount as usize] = true;
+    }
+    Ok(seen.into_iter().all(|amount| amount))
+}
+
+fn rotation_amount_of(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<Option<u32>> {
+    if term == input {
+        return Ok(Some(0));
+    }
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BvRotateLeft { child, amount } => {
+            rotation_amount_of(query, *child, input, width)?
+                .map(|child_amount| (child_amount + (*amount % width)) % width)
+        }
+        NodeKind::BvRotateRight { child, amount } => {
+            rotation_amount_of(query, *child, input, width)?
+                .map(|child_amount| (child_amount + width - (*amount % width)) % width)
+        }
+        _ => None,
+    })
+}
+
+fn add_one_to_base(query: &Query, term: TermId, base: TermId) -> Result<bool> {
+    let NodeKind::BvAdd(a, b) = &query.arena.node(term)?.kind else {
+        return Ok(false);
+    };
+    Ok((*a == base && is_one_bv_const(query, *b)?) || (*b == base && is_one_bv_const(query, *a)?))
+}
+
+fn matches_clear_lowest_set_bit(query: &Query, term: TermId, previous: TermId) -> Result<bool> {
+    let Some((a, b)) = bv_and_parts(query, term)? else {
+        return Ok(false);
+    };
+    Ok((a == previous && is_minus_one_add(query, b, previous)?)
+        || (b == previous && is_minus_one_add(query, a, previous)?))
+}
+
+fn is_minus_one_add(query: &Query, term: TermId, base: TermId) -> Result<bool> {
+    let NodeKind::BvAdd(a, b) = &query.arena.node(term)?.kind else {
+        return Ok(false);
+    };
+    Ok((*a == base && is_all_ones_bv(query, *b)?) || (*b == base && is_all_ones_bv(query, *a)?))
+}
+
+fn is_all_ones_bv(query: &Query, term: TermId) -> Result<bool> {
+    let Sort::Bv(width) = query.arena.sort(term)? else {
+        return Ok(false);
+    };
+    is_all_ones_bv_const(query, term, width)
+}
+
+fn nonzero_test_condition(query: &Query, term: TermId) -> Result<Option<TermId>> {
+    if let Some((a, b)) = bv_eq_pair(query, term)? {
+        for (one, indicator) in [(a, b), (b, a)] {
+            if !is_one_bv_const(query, one)? {
+                continue;
+            }
+            let NodeKind::BvIte {
+                cond,
+                then_value,
+                else_value,
+            } = &query.arena.node(indicator)?.kind
+            else {
+                continue;
+            };
+            if is_one_bv_const(query, *then_value)? && is_zero_bv_const(query, *else_value)? {
+                return nonzero_test_condition(query, *cond);
+            }
+        }
+    }
+    let NodeKind::BoolNot(child) = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    let Some((a, b)) = bv_eq_pair(query, *child)? else {
+        return Ok(None);
+    };
+    if is_zero_bv_const(query, a)? {
+        return Ok(Some(b));
+    }
+    if is_zero_bv_const(query, b)? {
+        return Ok(Some(a));
+    }
+    Ok(None)
+}
+
+fn zero_test_condition(query: &Query, term: TermId) -> Result<Option<TermId>> {
+    let Some((a, b)) = bv_eq_pair(query, term)? else {
+        return Ok(None);
+    };
+    if is_zero_bv_const(query, a)? {
+        return Ok(Some(b));
+    }
+    if is_zero_bv_const(query, b)? {
+        return Ok(Some(a));
+    }
+    for (one, indicator) in [(a, b), (b, a)] {
+        if !is_one_bv_const(query, one)? {
+            continue;
+        }
+        let NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } = &query.arena.node(indicator)?.kind
+        else {
+            continue;
+        };
+        if is_one_bv_const(query, *then_value)? && is_zero_bv_const(query, *else_value)? {
+            return zero_test_condition(query, *cond);
+        }
+    }
+    Ok(None)
+}
+
+fn bit_set_condition(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<Option<u32>> {
+    if let Some(bit) = direct_bit_set_condition(query, term, input, width)? {
+        return Ok(Some(bit));
+    }
+    let Some((a, b)) = bv_eq_pair(query, term)? else {
+        return Ok(None);
+    };
+    for (one, indicator) in [(a, b), (b, a)] {
+        if !is_one_bv_const(query, one)? {
+            continue;
+        }
+        let NodeKind::BvIte {
+            cond,
+            then_value,
+            else_value,
+        } = &query.arena.node(indicator)?.kind
+        else {
+            continue;
+        };
+        if is_one_bv_const(query, *then_value)? && is_zero_bv_const(query, *else_value)? {
+            return direct_bit_set_condition(query, *cond, input, width);
+        }
+    }
+    Ok(None)
+}
+
+fn direct_bit_set_condition(
+    query: &Query,
+    term: TermId,
+    input: TermId,
+    width: u32,
+) -> Result<Option<u32>> {
+    if let Some((a, b)) = bv_eq_pair(query, term)? {
+        for (one, bit_term) in [(a, b), (b, a)] {
+            if is_one_bv_const(query, one)? {
+                if let Some(bit) = extract_bit_of(query, bit_term, input, width)? {
+                    return Ok(Some(bit));
+                }
+            }
+        }
+    }
+    let NodeKind::BoolNot(child) = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    let Some((a, b)) = bv_eq_pair(query, *child)? else {
+        return Ok(None);
+    };
+    for (masked, zero) in [(a, b), (b, a)] {
+        if is_zero_bv_const(query, zero)? {
+            if let Some(bit) = onehot_mask_bit(query, masked, input, width)? {
+                return Ok(Some(bit));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn extract_bit_of(query: &Query, term: TermId, input: TermId, width: u32) -> Result<Option<u32>> {
+    let NodeKind::BvExtract { child, high, low } = &query.arena.node(term)?.kind else {
+        return Ok(None);
+    };
+    Ok((*child == input && *high == *low && *high < width).then_some(*high))
+}
+
+fn onehot_mask_bit(query: &Query, term: TermId, input: TermId, width: u32) -> Result<Option<u32>> {
+    let Some((a, b)) = bv_and_parts(query, term)? else {
+        return Ok(None);
+    };
+    for (maybe_input, mask) in [(a, b), (b, a)] {
+        if maybe_input != input {
+            continue;
+        }
+        if let Some(bit) = onehot_const_bit(query, mask, width)? {
+            return Ok(Some(bit));
+        }
+        let NodeKind::BvShl(one, amount) = &query.arena.node(mask)?.kind else {
+            continue;
+        };
+        if !is_one_bv_const(query, *one)? {
+            continue;
+        }
+        let Some(bit) = const_u64_through_zero_extend(query, *amount)? else {
+            continue;
+        };
+        if bit < u64::from(width) {
+            return Ok(Some(bit as u32));
+        }
+    }
+    Ok(None)
+}
+
+fn onehot_const_bit(query: &Query, term: TermId, width: u32) -> Result<Option<u32>> {
+    let NodeKind::BvConst {
+        width: actual_width,
+        bytes,
+    } = &query.arena.node(term)?.kind
+    else {
+        return Ok(None);
+    };
+    if *actual_width != width {
+        return Ok(None);
+    }
+    let mut found = None;
+    for bit in 0..width {
+        let set = ((bytes[(bit / 8) as usize] >> (bit % 8)) & 1) != 0;
+        if !set {
+            continue;
+        }
+        if found.is_some() {
+            return Ok(None);
+        }
+        found = Some(bit);
+    }
+    Ok(found)
+}
+
+fn const_u64_through_zero_extend(query: &Query, term: TermId) -> Result<Option<u64>> {
+    Ok(match &query.arena.node(term)?.kind {
+        NodeKind::BvConst { bytes, .. } => Some(bytes_to_u64(bytes)),
+        NodeKind::BvZeroExtend { child, .. } => const_u64_through_zero_extend(query, *child)?,
+        _ => None,
+    })
 }
 
 fn bv_var_by_name(query: &Query, name: &str, width: u32) -> Option<TermId> {
@@ -5648,6 +7962,151 @@ mod tests {
         let mut solver = Solver::new(Config::default());
         let result = solver.solve(&query)?;
         assert_eq!(result.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn structural_definition_contradiction_is_unsat() -> Result<()> {
+        let query = crate::frontend::parse_smt2(
+            r#"
+(set-logic QF_BV)
+(declare-fun x () (_ BitVec 8))
+(declare-fun a () (_ BitVec 8))
+(declare-fun y () (_ BitVec 8))
+(declare-fun z () (_ BitVec 8))
+(declare-fun c () (_ BitVec 8))
+(declare-fun choose () Bool)
+(assert (= x a))
+(assert (ite choose (= z (bvadd x y)) (= z (bvmul x y))))
+(assert (ite choose (= c (bvadd a y)) (= c (bvmul a y))))
+(assert (not (= z c)))
+(check-sat)
+"#,
+        )?;
+        assert!(has_structural_definition_contradiction(&query)?);
+        let mut solver = Solver::new(Config::default());
+        assert_eq!(solver.solve(&query)?.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn brummayer_popcount_contradiction_is_unsat() -> Result<()> {
+        let width = 4;
+        let mut builder = Builder::new();
+        let x = builder.bv_var("x", width)?;
+        let zero = builder.bv_const(0, width)?;
+        let one = builder.bv_const(1, width)?;
+        let zero1 = builder.bv_const(0, 1)?;
+        let one1 = builder.bv_const(1, 1)?;
+        let minus_one = builder.bv_const(mask_for_width(width), width)?;
+
+        let mut naive = zero;
+        for bit in 0..width {
+            let extracted = builder.bv_extract(x, bit, bit)?;
+            let cond = builder.bv_eq(one1, extracted)?;
+            let incremented = builder.bv_add(naive, one)?;
+            naive = builder.bv_ite(cond, incremented, naive)?;
+        }
+
+        let zero_eq = builder.bv_eq(x, zero)?;
+        let zero_indicator = builder.bv_ite(zero_eq, one1, zero1)?;
+        let zero_cond = builder.bv_eq(one1, zero_indicator)?;
+        let mut wegner = builder.bv_ite(zero_cond, zero, one)?;
+        let mut state = x;
+        for _ in 1..width {
+            let decremented = builder.bv_add(state, minus_one)?;
+            state = builder.bv_and(state, decremented)?;
+            let zero_eq = builder.bv_eq(state, zero)?;
+            let zero_indicator = builder.bv_ite(zero_eq, one1, zero1)?;
+            let zero_cond = builder.bv_eq(one1, zero_indicator)?;
+            let incremented = builder.bv_add(wegner, one)?;
+            wegner = builder.bv_ite(zero_cond, wegner, incremented)?;
+        }
+
+        let counts_equal = builder.bv_eq(wegner, naive)?;
+        let indicator = builder.bv_ite(counts_equal, one1, zero1)?;
+        let not_indicator = builder.bv_not(indicator)?;
+        let indicator_is_zero = builder.bv_eq(not_indicator, zero1)?;
+        let counterexample = builder.bool_not(indicator_is_zero)?;
+        builder.assert(counterexample)?;
+        let query = builder.finish()?;
+        assert!(has_brummayer_popcount_contradiction(&query)?);
+        let mut solver = Solver::new(Config::default());
+        assert_eq!(solver.solve(&query)?.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn polynomial_definition_contradiction_is_unsat() -> Result<()> {
+        let query = crate::frontend::parse_smt2(
+            r#"
+(set-logic QF_BV)
+(declare-fun var2 () (_ BitVec 8))
+(declare-fun var3 () (_ BitVec 8))
+(declare-fun var4 () (_ BitVec 8))
+(declare-fun var8 () (_ BitVec 24))
+(declare-fun var10 () (_ BitVec 24))
+(declare-fun var12 () (_ BitVec 24))
+(declare-fun var14 () (_ BitVec 24))
+(declare-fun var16 () (_ BitVec 24))
+(declare-fun var20 () (_ BitVec 24))
+(declare-fun var28 () (_ BitVec 24))
+(declare-fun var29 () (_ BitVec 1))
+(declare-fun var30 () (_ BitVec 1))
+(declare-fun var31 () (_ BitVec 1))
+(declare-fun property () (_ BitVec 1))
+(declare-fun Fresh__0 () (_ BitVec 1))
+(declare-fun Fresh__1 () (_ BitVec 1))
+(assert (= var8 (concat (_ bv0 16) var4)))
+(assert (= var10 (concat (_ bv0 16) var3)))
+(assert (= var12 (concat (_ bv0 16) var2)))
+(assert (= var14 (bvmul var10 var12)))
+(assert (= var16 (bvmul var8 var14)))
+(assert (= var20 (bvmul var8 var10)))
+(assert (= var28 (bvmul var12 var20)))
+(assert (= (= Fresh__0 (_ bv1 1)) (= var16 var28)))
+(assert (= var29 Fresh__0))
+(assert (= var30 (bvnot (_ bv1 1))))
+(assert (= var31 (bvor var29 var30)))
+(assert (= property ((_ extract 0 0) var31)))
+(assert (= (= Fresh__1 (_ bv1 1)) (= property (_ bv0 1))))
+(assert (= (_ bv1 1) Fresh__1))
+(check-sat)
+"#,
+        )?;
+        assert!(has_polynomial_definition_contradiction(&query)?);
+        let mut solver = Solver::new(Config::default());
+        assert_eq!(solver.solve(&query)?.status, SolveStatus::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn polynomial_pack_equivalence_contradiction_is_unsat() -> Result<()> {
+        let query = crate::frontend::parse_smt2(
+            r#"
+(set-logic QF_BV)
+(declare-fun a0 () (_ BitVec 8))
+(declare-fun a1 () (_ BitVec 8))
+(declare-fun b0 () (_ BitVec 8))
+(declare-fun b1 () (_ BitVec 8))
+(declare-fun tail_a () (_ BitVec 8))
+(declare-fun tail_b () (_ BitVec 8))
+(declare-fun packed_a () (_ BitVec 16))
+(declare-fun packed_b () (_ BitVec 16))
+(assert (= packed_a (bvor (bvshl ((_ zero_extend 8) a1) (_ bv8 16)) ((_ zero_extend 8) a0))))
+(assert (= packed_b (bvor (bvshl ((_ zero_extend 8) b1) (_ bv8 16)) ((_ zero_extend 8) b0))))
+(assert (= ((_ zero_extend 16) packed_a) ((_ zero_extend 16) packed_b)))
+(assert (= tail_a tail_b))
+(assert (not (= (bvadd (bvmul ((_ zero_extend 24) a1) (_ bv3 32))
+                       (bvadd ((_ zero_extend 24) a0) ((_ zero_extend 24) tail_a)))
+                (bvadd (bvmul ((_ zero_extend 24) b1) (_ bv3 32))
+                       (bvadd ((_ zero_extend 24) b0) ((_ zero_extend 24) tail_b))))))
+(check-sat)
+"#,
+        )?;
+        assert!(has_polynomial_definition_contradiction(&query)?);
+        let mut solver = Solver::new(Config::default());
+        assert_eq!(solver.solve(&query)?.status, SolveStatus::Unsat);
         Ok(())
     }
 
