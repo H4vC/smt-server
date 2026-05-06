@@ -16,7 +16,7 @@ pub mod smt2;
 pub mod smtlib;
 pub mod z3_backend;
 
-pub use backend::{Backend, QueryResult, QueryStatus};
+pub use backend::{Backend, CancellationToken, QueryResult, QueryStatus, SolveContext};
 pub use binbit_backend::BinbitBackend;
 pub use cache::{cache_key_for_payload, rebind_cached_response, CacheStats, ResponseCache};
 pub use pool::PooledBackend;

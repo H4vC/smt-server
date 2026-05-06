@@ -1,5 +1,12 @@
+use std::collections::HashSet;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use smt_wire::{
-    request_flags, Command, ModelBlock, OptimizationValueBlock, SimplifyBlock, UnsatCoreBlock,
+    expr::validate_node_ref, request_flags, BinaryRequest, Command, ModelBlock,
+    OptimizationValueBlock, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
 
 /// Solver-level status independent from the wire response envelope.
@@ -85,28 +92,187 @@ impl QueryResult {
         )
     }
 
-    pub fn is_conclusive_for(&self, request: &smt_wire::BinaryRequest) -> bool {
+    pub fn is_conclusive_for(&self, request: &BinaryRequest) -> bool {
+        let status_matches_command = match request.envelope.command {
+            Command::Solve => matches!(self.status, QueryStatus::Sat | QueryStatus::Unsat),
+            Command::Simplify => self.status == QueryStatus::Ok,
+            Command::Minimize | Command::Maximize => {
+                matches!(self.status, QueryStatus::Sat | QueryStatus::Unsat)
+            }
+        };
+        status_matches_command && self.validate_artifacts_for(request).is_ok()
+    }
+
+    pub fn validate_artifacts_for(&self, request: &BinaryRequest) -> smt_wire::Result<()> {
         match request.envelope.command {
-            Command::Solve => match self.status {
-                QueryStatus::Sat => {
-                    (request.envelope.flags & request_flags::WANT_MODEL) == 0
-                        || self.model.is_some()
-                }
-                QueryStatus::Unsat => {
-                    (request.envelope.flags & request_flags::WANT_CORE) == 0 || self.core.is_some()
-                }
-                QueryStatus::Unknown | QueryStatus::Ok => false,
-            },
-            Command::Simplify => self.status == QueryStatus::Ok && self.simplify.is_some(),
-            Command::Minimize | Command::Maximize => match self.status {
-                QueryStatus::Sat => self.optimization.as_ref().is_some_and(|optimization| {
-                    (request.envelope.flags & request_flags::WANT_MODEL) == 0
-                        || optimization.model.is_some()
-                }),
-                QueryStatus::Unsat => true,
-                QueryStatus::Unknown | QueryStatus::Ok => false,
-            },
+            Command::Solve => self.validate_solve_artifacts(request),
+            Command::Simplify => self.validate_simplify_artifacts(),
+            Command::Minimize | Command::Maximize => self.validate_optimization_artifacts(request),
         }
+    }
+
+    fn validate_solve_artifacts(&self, request: &BinaryRequest) -> smt_wire::Result<()> {
+        let want_model = (request.envelope.flags & request_flags::WANT_MODEL) != 0;
+        let want_core = (request.envelope.flags & request_flags::WANT_CORE) != 0;
+        match self.status {
+            QueryStatus::Sat if want_model => self
+                .model
+                .as_ref()
+                .ok_or_else(|| WireError::invalid("solve result", "SAT without requested model"))
+                .and_then(|model| validate_model(request, model)),
+            QueryStatus::Unsat if want_core => self
+                .core
+                .as_ref()
+                .ok_or_else(|| WireError::invalid("solve result", "UNSAT without requested core"))
+                .and_then(|core| validate_unsat_core(request, core)),
+            QueryStatus::Sat | QueryStatus::Unsat | QueryStatus::Unknown => Ok(()),
+            QueryStatus::Ok => Err(WireError::invalid("solve result", "SOLVE returned OK")),
+        }
+    }
+
+    fn validate_simplify_artifacts(&self) -> smt_wire::Result<()> {
+        match self.status {
+            QueryStatus::Ok => self
+                .simplify
+                .as_ref()
+                .ok_or_else(|| WireError::invalid("simplify result", "OK without simplify block"))
+                .and_then(SimplifyBlock::validate),
+            QueryStatus::Unknown => Ok(()),
+            QueryStatus::Sat | QueryStatus::Unsat => Err(WireError::invalid(
+                "simplify result",
+                "SIMPLIFY returned SAT/UNSAT",
+            )),
+        }
+    }
+
+    fn validate_optimization_artifacts(&self, request: &BinaryRequest) -> smt_wire::Result<()> {
+        match self.status {
+            QueryStatus::Sat => {
+                let optimization = self.optimization.as_ref().ok_or_else(|| {
+                    WireError::invalid("optimization result", "SAT without optimum block")
+                })?;
+                if (request.envelope.flags & request_flags::WANT_MODEL) != 0
+                    && optimization.model.is_none()
+                {
+                    return Err(WireError::invalid(
+                        "optimization result",
+                        "SAT without requested model",
+                    ));
+                }
+                validate_optimization(request, optimization)
+            }
+            QueryStatus::Unsat | QueryStatus::Unknown => Ok(()),
+            QueryStatus::Ok => Err(WireError::invalid(
+                "optimization result",
+                "optimization returned OK",
+            )),
+        }
+    }
+}
+
+fn validate_model(request: &BinaryRequest, model: &ModelBlock) -> smt_wire::Result<()> {
+    let expr = request.expression_view()?;
+    model.validate_against_expr(&expr)
+}
+
+fn validate_unsat_core(request: &BinaryRequest, core: &UnsatCoreBlock) -> smt_wire::Result<()> {
+    let expr = request.expression_view()?;
+    let mut allowed = HashSet::with_capacity(request.named_assertion_refs.len());
+    for name_ref in &request.named_assertion_refs {
+        allowed.insert(expr.blob_str(*name_ref, "named assertion")?.to_owned());
+    }
+    let mut seen = HashSet::with_capacity(core.names.len());
+    for name in &core.names {
+        if !allowed.contains(name) {
+            return Err(WireError::invalid(
+                "unsat core",
+                format!("backend returned unknown core name {name:?}"),
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(WireError::invalid(
+                "unsat core",
+                format!("backend returned duplicate core name {name:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optimization(
+    request: &BinaryRequest,
+    optimization: &OptimizationValueBlock,
+) -> smt_wire::Result<()> {
+    optimization.optimum.validate()?;
+    let expr = request.expression_view()?;
+    let target = request
+        .target_ref()
+        .ok_or_else(|| WireError::invalid("optimization response", "missing target node"))?;
+    let target_node = validate_node_ref(&expr, target, Sort::Bv, "optimization target")?;
+    if optimization.optimum.width != target_node.width {
+        return Err(WireError::invalid(
+            "optimization optimum",
+            format!(
+                "target width {} but optimum width {}",
+                target_node.width, optimization.optimum.width
+            ),
+        ));
+    }
+    if (request.envelope.flags & request_flags::WANT_MODEL) != 0 {
+        if let Some(model) = &optimization.model {
+            model.validate_against_expr(&expr)?;
+        }
+    }
+    Ok(())
+}
+
+/// Cooperative cancellation token passed to backends that can stop in-flight
+/// work. Backends that do not support cancellation can ignore it and continue
+/// using `handle`.
+#[derive(Debug, Clone)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-request context for backend execution.
+#[derive(Debug, Clone, Default)]
+pub struct SolveContext {
+    cancellation: CancellationToken,
+}
+
+impl SolveContext {
+    pub fn new(cancellation: CancellationToken) -> Self {
+        Self { cancellation }
+    }
+
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
 }
 
@@ -120,4 +286,18 @@ pub trait Backend: Send + Sync {
     }
 
     fn handle(&self, request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult>;
+
+    fn handle_with_context(
+        &self,
+        request: &smt_wire::BinaryRequest,
+        context: &SolveContext,
+    ) -> smt_wire::Result<QueryResult> {
+        if context.is_cancelled() {
+            Ok(QueryResult::unknown(
+                "backend request cancelled before start",
+            ))
+        } else {
+            self.handle(request)
+        }
+    }
 }

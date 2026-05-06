@@ -54,6 +54,7 @@ struct FunctionBinding {
 struct ScriptState {
     builder: ExprBuilder,
     env: HashMap<String, Binding>,
+    declared_symbols: HashMap<String, SmtSort>,
     functions: HashMap<String, FunctionBinding>,
     expansion_depth: usize,
     want_model: bool,
@@ -228,7 +229,8 @@ fn declare_const(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Result<()
         SmtSort::Bool => state.builder.bool_var(&name)?,
         SmtSort::Bv(width) => state.builder.bv_var(&name, width)?,
     };
-    state.env.insert(name, Binding { node, sort });
+    state.env.insert(name.clone(), Binding { node, sort });
+    state.declared_symbols.insert(name, sort);
     Ok(())
 }
 
@@ -382,7 +384,20 @@ fn get_value_command(state: &mut ScriptState, list: &[SExpr]) -> smt_wire::Resul
     state.want_model = true;
     for term in terms {
         match term {
-            SExpr::Atom(name) => state.get_values.push(name.clone()),
+            SExpr::Atom(name) => {
+                if !state.declared_symbols.contains_key(name) {
+                    return Err(WireError::invalid(
+                        "get-value",
+                        format!("unknown declared symbol {name:?}"),
+                    ));
+                }
+                let binding = state.env.get(name).cloned().ok_or_else(|| {
+                    WireError::invalid("get-value", format!("undefined symbol {name:?}"))
+                })?;
+                let tautology = equality_node(state, binding.clone(), binding, "get-value")?;
+                state.builder.assert(tautology)?;
+                state.get_values.push(name.clone());
+            }
             _ => {
                 return Err(WireError::invalid(
                     "get-value",
@@ -798,14 +813,27 @@ fn parse_let(
         SExpr::List(items) => items,
         _ => return Err(WireError::invalid("let", "expected binding list")),
     };
-    let mut nested = locals.clone();
+    let mut parsed_bindings = Vec::with_capacity(bindings.len());
     for binding in bindings {
         let pair = match binding {
             SExpr::List(pair) if pair.len() == 2 => pair,
             _ => return Err(WireError::invalid("let", "bad binding")),
         };
         let name = atom(&pair[0])?.to_owned();
-        let value = parse_expr_with_locals(state, &pair[1], &mut nested)?;
+        if parsed_bindings
+            .iter()
+            .any(|(existing, _): &(String, Binding)| existing == &name)
+        {
+            return Err(WireError::invalid(
+                "let",
+                format!("duplicate binding {name:?}"),
+            ));
+        }
+        let value = parse_expr_with_locals(state, &pair[1], locals)?;
+        parsed_bindings.push((name, value));
+    }
+    let mut nested = locals.clone();
+    for (name, value) in parsed_bindings {
         nested.insert(name, value);
     }
     parse_expr_with_locals(state, &items[2], &mut nested)

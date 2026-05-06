@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+
 use smt_wire::{
-    request::is_binary_request_payload, response_flags, BinaryRequest, BinaryResponse, Command,
-    Status, WireError,
+    expr::validate_node_ref, request::is_binary_request_payload, response_flags, BinaryRequest,
+    BinaryResponse, Command, ModelBlock, OptimizationValueBlock, SimplifyBlock, Sort, Status,
+    UnsatCoreBlock, WireError,
 };
 
 use crate::backend::{Backend, QueryResult, QueryStatus};
@@ -53,6 +56,12 @@ fn solve_response(
         QueryStatus::Sat => {
             if want_model {
                 if let Some(model) = result.model {
+                    if let Err(err) = validate_model(request, &model) {
+                        return BinaryResponse::error(
+                            request_id,
+                            &format!("invalid backend model: {err}"),
+                        );
+                    }
                     BinaryResponse::new(
                         request_id,
                         Status::Sat,
@@ -69,6 +78,12 @@ fn solve_response(
         QueryStatus::Unsat => {
             if want_core {
                 if let Some(core) = result.core {
+                    if let Err(err) = validate_unsat_core(request, &core) {
+                        return BinaryResponse::error(
+                            request_id,
+                            &format!("invalid backend unsat core: {err}"),
+                        );
+                    }
                     BinaryResponse::new(
                         request_id,
                         Status::Unsat,
@@ -106,6 +121,12 @@ fn simplify_response(request_id: u32, result: QueryResult) -> smt_wire::Result<B
             let simplify = result.simplify.ok_or_else(|| {
                 WireError::invalid("simplify response", "OK result without simplify block")
             })?;
+            if let Err(err) = validate_simplify(&simplify) {
+                return BinaryResponse::error(
+                    request_id,
+                    &format!("invalid backend simplify block: {err}"),
+                );
+            }
             BinaryResponse::new(
                 request_id,
                 Status::Ok,
@@ -118,6 +139,64 @@ fn simplify_response(request_id: u32, result: QueryResult) -> smt_wire::Result<B
             BinaryResponse::error(request_id, "SIMPLIFY backend returned SAT/UNSAT")
         }
     }
+}
+
+fn validate_model(request: &BinaryRequest, model: &ModelBlock) -> smt_wire::Result<()> {
+    let expr = request.expression_view()?;
+    model.validate_against_expr(&expr)
+}
+
+fn validate_unsat_core(request: &BinaryRequest, core: &UnsatCoreBlock) -> smt_wire::Result<()> {
+    let expr = request.expression_view()?;
+    let mut allowed = HashSet::with_capacity(request.named_assertion_refs.len());
+    for name_ref in &request.named_assertion_refs {
+        allowed.insert(expr.blob_str(*name_ref, "named assertion")?.to_owned());
+    }
+    let mut seen = HashSet::with_capacity(core.names.len());
+    for name in &core.names {
+        if !allowed.contains(name) {
+            return Err(WireError::invalid(
+                "unsat core",
+                format!("backend returned unknown core name {name:?}"),
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(WireError::invalid(
+                "unsat core",
+                format!("backend returned duplicate core name {name:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_simplify(simplify: &SimplifyBlock) -> smt_wire::Result<()> {
+    simplify.validate()
+}
+
+fn validate_optimization(
+    request: &BinaryRequest,
+    optimization: &OptimizationValueBlock,
+) -> smt_wire::Result<()> {
+    optimization.optimum.validate()?;
+    let expr = request.expression_view()?;
+    let target = request
+        .target_ref()
+        .ok_or_else(|| WireError::invalid("optimization response", "missing target node"))?;
+    let target_node = validate_node_ref(&expr, target, Sort::Bv, "optimization target")?;
+    if optimization.optimum.width != target_node.width {
+        return Err(WireError::invalid(
+            "optimization optimum",
+            format!(
+                "target width {} but optimum width {}",
+                target_node.width, optimization.optimum.width
+            ),
+        ));
+    }
+    if let Some(model) = &optimization.model {
+        model.validate_against_expr(&expr)?;
+    }
+    Ok(())
 }
 
 fn optimize_response(
@@ -139,6 +218,12 @@ fn optimize_response(
             }
             if !want_model {
                 optimization.model = None;
+            }
+            if let Err(err) = validate_optimization(request, &optimization) {
+                return BinaryResponse::error(
+                    request_id,
+                    &format!("invalid backend optimization block: {err}"),
+                );
             }
             let mut flags = response_flags::HAS_VALUE;
             if optimization.model.is_some() {

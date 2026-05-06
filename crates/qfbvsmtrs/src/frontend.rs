@@ -47,6 +47,7 @@ struct FunctionBinding {
 struct ScriptState {
     builder: Builder,
     env: HashMap<String, Binding>,
+    declared_symbols: HashMap<String, SmtSort>,
     functions: HashMap<String, FunctionBinding>,
     expansion_depth: usize,
     saw_check_sat: bool,
@@ -173,7 +174,8 @@ fn declare_const(state: &mut ScriptState, list: &[SExpr]) -> Result<()> {
         SmtSort::Bool => state.builder.bool_var(&name)?,
         SmtSort::Bv(width) => state.builder.bv_var(&name, width)?,
     };
-    state.env.insert(name, Binding { node, sort });
+    state.env.insert(name.clone(), Binding { node, sort });
+    state.declared_symbols.insert(name, sort);
     Ok(())
 }
 
@@ -330,7 +332,15 @@ fn get_value_command(state: &mut ScriptState, list: &[SExpr]) -> Result<()> {
     };
     for term in terms {
         match term {
-            SExpr::Atom(name) => state.builder.add_get_value(name.clone()),
+            SExpr::Atom(name) => {
+                if !state.declared_symbols.contains_key(name) {
+                    return Err(Error::invalid(
+                        "get-value",
+                        format!("unknown declared symbol {name:?}"),
+                    ));
+                }
+                state.builder.add_get_value(name.clone());
+            }
             _ => {
                 return Err(Error::unsupported(
                     "get-value currently supports declared symbols",
@@ -1730,5 +1740,20 @@ mod tests {
         let mut solver = Solver::new(Config::default());
         assert_eq!(solver.solve(&query)?.status, SolveStatus::Sat);
         Ok(())
+    }
+
+    #[test]
+    fn get_value_rejects_unknown_symbols() {
+        let err = parse_smt2(
+            r#"
+(set-logic QF_BV)
+(declare-const x (_ BitVec 1))
+(assert (= x #b1))
+(check-sat)
+(get-value (y))
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("y"), "{err}");
     }
 }

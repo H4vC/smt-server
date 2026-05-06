@@ -1,0 +1,33 @@
+name: Extended validation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  READ_ONLY_GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  qfbvsmtrs-extended:
+    name: qfbvsmtrs extended random/differential tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-stable-extended
+      - name: Extended random circuit identities
+        env:
+          QFBVSMTRS_RANDOM_CIRCUIT_SAMPLES: "10000"
+        run: cargo test -p qfbvsmtrs --test random_circuits randomized_wide_circuit_identities_production_when_enabled
+      - name: Extended random differential tests against z3
+        env:
+          QFBVSMTRS_DIFF_RANDOM: "1"
+        run: cargo test -p qfbvsmtrs --test differential_z3 differential_random_formulas_against_z3_production_when_enabled

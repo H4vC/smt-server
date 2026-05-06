@@ -3,24 +3,47 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # z3-sys' gh-release feature queries/downloads GitHub release assets while
+  # building the z3 backend. Authenticated read-only requests avoid sporadic
+  # 403s/rate-limit failures on CI runners, especially macOS.
+  READ_ONLY_GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-stable
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: qfbvsmtrs fuzz crate check
+        run: cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
       - name: Python client smoke
         run: python clients/tests/test_python_client.py
       - name: Live server end-to-end

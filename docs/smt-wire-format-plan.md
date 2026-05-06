@@ -284,9 +284,9 @@ All entries in the child array use this encoding. This provides structural sort-
 
 Constants are encoded with a width-dependent strategy:
 
-- **Width ≤ 64 bits**: value is stored inline in the 8-byte `payload` field. No blob table access needed. The value is interpreted little-endian as an unsigned integer and masked to `width` bits. Encoders should zero bits above `width` for deterministic hashing.
+- **Width ≤ 64 bits**: value is stored inline in the 8-byte `payload` field. No blob table access needed. The value is interpreted little-endian as an unsigned integer; bits above `width` are semantically ignored by v1 consumers. Canonical encoders should zero bits above `width` for deterministic hashing and cache keys.
 
-- **Width > 64 bits**: `payload` encodes a blob table reference as `(offset << 32) | byte_length`. The blob table stores the value as little-endian bytes, exactly `ceil(width / 8)` bytes long. This handles SSE (128-bit), AVX (256-bit), AVX-512 (512-bit), and arbitrary-precision constants uniformly. Encoders should zero unused high bits in the final byte when `width` is not a multiple of 8.
+- **Width > 64 bits**: `payload` encodes a blob table reference as `(offset << 32) | byte_length`. The blob table stores the value as little-endian bytes, exactly `ceil(width / 8)` bytes long. This handles SSE (128-bit), AVX (256-bit), AVX-512 (512-bit), and arbitrary-precision constants uniformly. If `width` is not a multiple of 8, unused high bits in the final byte are semantically ignored by v1 consumers. Canonical encoders should zero them for deterministic hashing and cache keys.
 
 The client API exposes this as two constructors: a common-case one taking a machine integer, and a wide one taking a byte/limb array. The branching is internal.
 

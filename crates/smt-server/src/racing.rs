@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use smt_wire::BinaryRequest;
 
-use crate::backend::{Backend, QueryResult};
+use crate::backend::{Backend, CancellationToken, QueryResult, SolveContext};
 
 /// Backend that races several backend implementations and returns the first
 /// conclusive result. `UNKNOWN` results are held until all backends are
@@ -57,6 +57,7 @@ impl Backend for RacingBackend {
             request.envelope.budget_ms
         };
         let (tx, rx) = mpsc::channel();
+        let mut cancellation_tokens = Vec::with_capacity(self.backends.len());
         for backend in &self.backends {
             let tx = tx.clone();
             let backend = Arc::clone(backend);
@@ -64,8 +65,11 @@ impl Backend for RacingBackend {
             if request.envelope.budget_ms == 0 {
                 request.envelope.budget_ms = effective_budget_ms;
             }
+            let cancellation = CancellationToken::new();
+            let context = SolveContext::new(cancellation.clone());
+            cancellation_tokens.push(cancellation);
             thread::spawn(move || {
-                let result = backend.handle(&request);
+                let result = backend.handle_with_context(&request, &context);
                 let _ = tx.send((backend.name(), result));
             });
         }
@@ -75,6 +79,7 @@ impl Backend for RacingBackend {
         while let Some((name, result)) = recv_result(&rx, deadline) {
             match result {
                 Ok(result) if result.is_conclusive_for(request) => {
+                    cancel_all(&cancellation_tokens);
                     let winner_status = result.status;
                     thread::spawn(move || {
                         for (other_name, other_result) in rx {
@@ -108,6 +113,7 @@ impl Backend for RacingBackend {
                 }
             }
         }
+        cancel_all(&cancellation_tokens);
         Ok(first_unknown.unwrap_or_else(|| {
             if deadline.is_some() {
                 QueryResult::unknown("racing backend deadline elapsed")
@@ -120,6 +126,12 @@ impl Backend for RacingBackend {
 
 fn racing_deadline(budget_ms: u32) -> Option<Instant> {
     (budget_ms != 0).then(|| Instant::now() + Duration::from_millis(u64::from(budget_ms)))
+}
+
+fn cancel_all(tokens: &[CancellationToken]) {
+    for token in tokens {
+        token.cancel();
+    }
 }
 
 fn recv_result<T>(rx: &mpsc::Receiver<T>, deadline: Option<Instant>) -> Option<T> {

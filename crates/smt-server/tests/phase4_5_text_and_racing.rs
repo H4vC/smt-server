@@ -1,9 +1,12 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use smt_server::{
     handle_text_frame, parse_smtlib_script, request_to_smt2, Backend, BinbitBackend,
-    QfbvsmtrsBackend, QueryResult, RacingBackend, Z3Backend,
+    QfbvsmtrsBackend, QueryResult, RacingBackend, SolveContext, Z3Backend,
 };
 use smt_wire::{BinaryRequest, ExprBuilder};
 
@@ -91,6 +94,40 @@ fn smtlib_text_frontend_get_value_formats_value_response() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.starts_with("sat\n"), "{text}");
     assert!(text.contains("((x #b10))"), "{text}");
+}
+
+#[test]
+fn smtlib_text_frontend_rejects_get_value_unknown_symbol() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 1))
+        (assert (= x #b1))
+        (check-sat)
+        (get-value (y))
+    "#;
+    for backend in [
+        &BinbitBackend as &dyn Backend,
+        &QfbvsmtrsBackend as &dyn Backend,
+    ] {
+        let output = handle_text_frame(script.as_bytes(), backend).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("error"), "{text}");
+        assert!(text.contains("y"), "{text}");
+    }
+}
+
+#[test]
+fn smtlib_text_frontend_get_value_keeps_unconstrained_symbol_live() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 2))
+        (check-sat)
+        (get-value (x))
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+    assert!(text.contains("((x #b"), "{text}");
 }
 
 #[test]
@@ -238,6 +275,19 @@ fn smtlib_parser_supports_let_extract_and_assumptions() {
 }
 
 #[test]
+fn smtlib_text_frontend_let_bindings_are_simultaneous() {
+    let script = r#"
+        (set-logic QF_BV)
+        (declare-const x (_ BitVec 1))
+        (assert (let ((x #b0) (y x)) (= y #b1)))
+        (check-sat)
+    "#;
+    let output = handle_text_frame(script.as_bytes(), &BinbitBackend).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("sat\n"), "{text}");
+}
+
+#[test]
 fn smt2_translation_contains_declarations_and_named_assertions() {
     let mut builder = ExprBuilder::new();
     let x = builder.bv_var("x", 4).unwrap();
@@ -289,6 +339,33 @@ impl Backend for ImmediateSatBackend {
     }
 }
 
+struct CancellableSlowBackend {
+    observed_cancel: Arc<AtomicBool>,
+}
+impl Backend for CancellableSlowBackend {
+    fn name(&self) -> &'static str {
+        "cancellable-slow-test"
+    }
+    fn handle(&self, _request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
+        Ok(QueryResult::unknown("cancellable backend requires context"))
+    }
+    fn handle_with_context(
+        &self,
+        _request: &BinaryRequest,
+        context: &SolveContext,
+    ) -> smt_wire::Result<QueryResult> {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            if context.is_cancelled() {
+                self.observed_cancel.store(true, Ordering::Release);
+                return Ok(QueryResult::unknown("cancelled"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(QueryResult::unknown("not cancelled"))
+    }
+}
+
 #[test]
 fn smtlib_text_frontend_does_not_claim_sat_without_requested_model() {
     let script = r#"
@@ -330,6 +407,34 @@ fn racing_backend_returns_first_conclusive_without_waiting_for_slow_unknown() {
     let result = racing.handle(&request).unwrap();
     assert!(result.is_conclusive());
     assert!(start.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn racing_backend_cancels_cooperative_losers_after_winner() {
+    let mut builder = ExprBuilder::new();
+    let t = builder.bool_true().unwrap();
+    builder.assert(t).unwrap();
+    let request =
+        BinaryRequest::parse(&builder.build_solve_request(7, 0, false, false).unwrap()).unwrap();
+    let observed_cancel = Arc::new(AtomicBool::new(false));
+    let racing = RacingBackend::new(vec![
+        Arc::new(CancellableSlowBackend {
+            observed_cancel: Arc::clone(&observed_cancel),
+        }),
+        Arc::new(ImmediateSatBackend),
+    ]);
+    let result = racing.handle(&request).unwrap();
+    assert!(result.is_conclusive());
+    for _ in 0..50 {
+        if observed_cancel.load(Ordering::Acquire) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        observed_cancel.load(Ordering::Acquire),
+        "cooperative loser did not observe cancellation"
+    );
 }
 
 #[test]
