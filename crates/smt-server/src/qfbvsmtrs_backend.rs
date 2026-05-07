@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use smt_wire::{
     BinaryRequest, Command, OptimizationValueBlock, ScalarValue, SimplifyBlock, UnsatCoreBlock,
+    WireError,
 };
 
 use crate::backend::{Backend, QueryResult, SolveContext};
@@ -22,9 +23,9 @@ impl Backend for QfbvsmtrsBackend {
         match request.envelope.command {
             Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
                 expression: request.expression.clone(),
-                assertion_roots: request.assertion_roots.clone(),
-                named_assertion_refs: request.named_assertion_refs.clone(),
-                assumption_roots: request.assumption_roots.clone(),
+                target_node: request
+                    .target_ref()
+                    .ok_or_else(|| WireError::invalid("simplify request", "missing target_node"))?,
             })),
             Command::Solve | Command::Minimize | Command::Maximize => solve(request),
         }

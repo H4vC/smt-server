@@ -4,7 +4,7 @@ use crate::expr::{
     bytes_for_width, is_variable_node, validate_node_ref, ExprView, ExpressionBuffer,
 };
 use crate::le;
-use crate::types::{BlobRef, NodeRef, Sort};
+use crate::types::{NodeRef, Sort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseEnvelope {
@@ -487,9 +487,7 @@ impl UnsatCoreBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimplifyBlock {
     pub expression: Vec<u8>,
-    pub assertion_roots: Vec<NodeRef>,
-    pub named_assertion_refs: Vec<BlobRef>,
-    pub assumption_roots: Vec<NodeRef>,
+    pub target_node: NodeRef,
 }
 
 impl SimplifyBlock {
@@ -498,70 +496,25 @@ impl SimplifyBlock {
         let expr_len = u32::try_from(self.expression.len()).map_err(|_| {
             WireError::invalid("simplify block", "expression length exceeds u32::MAX")
         })?;
-        let assertion_count = u16::try_from(self.assertion_roots.len()).map_err(|_| {
-            WireError::invalid("simplify block", "assertion count exceeds u16::MAX")
-        })?;
-        let named_count = u16::try_from(self.named_assertion_refs.len())
-            .map_err(|_| WireError::invalid("simplify block", "named count exceeds u16::MAX"))?;
-        let assumption_count = u16::try_from(self.assumption_roots.len()).map_err(|_| {
-            WireError::invalid("simplify block", "assumption count exceeds u16::MAX")
-        })?;
 
         let mut out = Vec::new();
         le::write_u32(&mut out, expr_len);
-        le::write_u16(&mut out, assertion_count);
-        le::write_u16(&mut out, named_count);
-        le::write_u16(&mut out, assumption_count);
-        le::write_u16(&mut out, 0);
+        le::write_u32(&mut out, self.target_node.raw());
         out.extend_from_slice(&self.expression);
-        for root in &self.assertion_roots {
-            le::write_u32(&mut out, root.raw());
-        }
-        for name in &self.named_assertion_refs {
-            le::write_u32(&mut out, name.offset);
-            le::write_u32(&mut out, name.len);
-        }
-        for root in &self.assumption_roots {
-            le::write_u32(&mut out, root.raw());
-        }
         Ok(out)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self> {
-        if payload.len() < 12 {
+        if payload.len() < 8 {
             return Err(WireError::UnexpectedEof {
                 context: "simplify block header",
-                needed: 12,
+                needed: 8,
                 actual: payload.len(),
             });
         }
         let expr_len = le::read_u32(payload, 0, "simplify expr_len")? as usize;
-        let assertion_count = le::read_u16(payload, 4, "simplify assertion_count")? as usize;
-        let named_count = le::read_u16(payload, 6, "simplify named_count")? as usize;
-        let assumption_count = le::read_u16(payload, 8, "simplify assumption_count")? as usize;
-        if named_count > assertion_count {
-            return Err(WireError::invalid(
-                "simplify block",
-                "named_count exceeds assertion_count",
-            ));
-        }
-        let mut expected = 12usize;
-        expected = le::checked_add(expected, expr_len, "simplify block length")?;
-        expected = le::checked_add(
-            expected,
-            le::checked_mul(assertion_count, 4, "simplify assertions length")?,
-            "simplify block length",
-        )?;
-        expected = le::checked_add(
-            expected,
-            le::checked_mul(named_count, 8, "simplify named refs length")?,
-            "simplify block length",
-        )?;
-        expected = le::checked_add(
-            expected,
-            le::checked_mul(assumption_count, 4, "simplify assumptions length")?,
-            "simplify block length",
-        )?;
+        let target_node = NodeRef::from_raw(le::read_u32(payload, 4, "simplify target_node")?);
+        let expected = le::checked_add(8, expr_len, "simplify block length")?;
         if payload.len() != expected {
             return Err(WireError::LengthMismatch {
                 context: "simplify block",
@@ -569,63 +522,23 @@ impl SimplifyBlock {
                 actual: payload.len(),
             });
         }
-        let mut offset = 12;
-        let expression = payload[offset..offset + expr_len].to_vec();
-        offset += expr_len;
-        let mut assertion_roots = Vec::with_capacity(assertion_count);
-        for _ in 0..assertion_count {
-            assertion_roots.push(NodeRef::from_raw(le::read_u32(
-                payload,
-                offset,
-                "simplify assertion root",
-            )?));
-            offset += 4;
-        }
-        let mut named_assertion_refs = Vec::with_capacity(named_count);
-        for _ in 0..named_count {
-            named_assertion_refs.push(BlobRef::new(
-                le::read_u32(payload, offset, "simplify name offset")?,
-                le::read_u32(payload, offset + 4, "simplify name length")?,
-            ));
-            offset += 8;
-        }
-        let mut assumption_roots = Vec::with_capacity(assumption_count);
-        for _ in 0..assumption_count {
-            assumption_roots.push(NodeRef::from_raw(le::read_u32(
-                payload,
-                offset,
-                "simplify assumption root",
-            )?));
-            offset += 4;
-        }
-        debug_assert_eq!(offset, expected);
+        let expression = payload[8..8 + expr_len].to_vec();
         let block = Self {
             expression,
-            assertion_roots,
-            named_assertion_refs,
-            assumption_roots,
+            target_node,
         };
         block.validate()?;
         Ok(block)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.named_assertion_refs.len() > self.assertion_roots.len() {
-            return Err(WireError::invalid(
-                "simplify block",
-                "named_count exceeds assertion_count",
-            ));
-        }
         let expr = ExprView::parse_and_validate(&self.expression)?;
-        for root in &self.assertion_roots {
-            validate_node_ref(&expr, *root, Sort::Bool, "simplify assertion root")?;
-        }
-        for root in &self.assumption_roots {
-            validate_node_ref(&expr, *root, Sort::Bool, "simplify assumption root")?;
-        }
-        for name in &self.named_assertion_refs {
-            expr.blob_str(*name, "simplify named assertion")?;
-        }
+        validate_node_ref(
+            &expr,
+            self.target_node,
+            self.target_node.sort(),
+            "simplify target_node",
+        )?;
         Ok(())
     }
 

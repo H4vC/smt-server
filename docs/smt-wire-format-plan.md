@@ -328,7 +328,7 @@ The protocol is request/response with pipelining via `request_id`. Responses may
 | `assertion_count`  | 2B   | Number of assertion root IDs                                 |
 | `named_count`      | 2B   | How many of the first assertions are named                   |
 | `assumption_count` | 2B   | Number of assumption root IDs                                |
-| `target_node`      | 4B   | For MINIMIZE/MAXIMIZE: the BV node to optimize; 0 otherwise  |
+| `target_node`      | 4B   | For SIMPLIFY: expression root to simplify; for MINIMIZE/MAXIMIZE: BV node to optimize; 0 otherwise |
 | `_pad`             | 4B   | Reserved; encoders should write zero, decoders ignore         |
 
 Total: 32 bytes.
@@ -340,14 +340,14 @@ Following the header:
 3. Named assertion string refs (`named_count × 8B`) — each is `(blob_offset: u32, blob_len: u32)` pointing into the expression buffer's blob table
 4. Assumption root IDs (`assumption_count × 4B`) — Bool node refs, temporary for this solve call only
 
-The binary request frame length must equal `32 + expr_len + assertion_count*4 + named_count*8 + assumption_count*4`. `named_count` must be less than or equal to `assertion_count`; the first `named_count` assertion roots are the named assertions. `target_node` is ignored for `SOLVE` and `SIMPLIFY`; for `MINIMIZE`/`MAXIMIZE`, it must be a valid BV node ref.
+The binary request frame length must equal `32 + expr_len + assertion_count*4 + named_count*8 + assumption_count*4`. `named_count` must be less than or equal to `assertion_count`; the first `named_count` assertion roots are the named assertions. `SOLVE` uses assertions/assumptions and requires `target_node = 0`. `SIMPLIFY` accepts a single target expression, requires `target_node` to be a valid BV or Bool node ref, and uses no assertions or assumptions. For `MINIMIZE`/`MAXIMIZE`, `target_node` must be a valid BV node ref.
 
 ### Commands
 
 | Command      | Description                                                    |
 |--------------|----------------------------------------------------------------|
 | `SOLVE`      | Check satisfiability of assertions under assumptions           |
-| `SIMPLIFY`   | Return a simplified expression buffer                          |
+| `SIMPLIFY`   | Simplify the expression rooted at `target_node` and return a simplified expression buffer plus new root |
 | `MINIMIZE`   | Find minimum value of `target_node` under constraints          |
 | `MAXIMIZE`   | Find maximum value of `target_node` under constraints          |
 
@@ -471,21 +471,11 @@ Returned by `SIMPLIFY` on success. `status = OK` means the simplification comple
 
 ```
 u32 expr_len
-u16 assertion_count
-u16 named_count
-u16 assumption_count
-u16 reserved
+u32 target_node
 u8[expr_len] expression_buffer
-u32 assertion_roots[assertion_count]
-named_ref named_assertion_refs[named_count]
-u32 assumption_roots[assumption_count]
-
-named_ref:
-  u32 blob_offset
-  u32 blob_len
 ```
 
-The expression buffer is a complete expression buffer using the same layout as requests. Root IDs and named assertion refs point into the returned expression buffer. `named_count` names the first `named_count` assertions, matching the request layout. This block intentionally uses a compact header rather than reusing the request envelope; clients can reuse the expression-buffer parser, but must parse the simplify block's root/name lists separately.
+The expression buffer is a complete expression buffer using the same layout as requests. `target_node` is the typed BV or Bool root of the simplified expression inside the returned expression buffer. This block intentionally uses a compact header rather than reusing the request envelope; clients can reuse the expression-buffer parser, then evaluate or display the returned `target_node`.
 
 #### Optimization value block
 
@@ -603,7 +593,7 @@ Every client library exposes the same logical API:
 
 **Scope management**: `push()`, `pop()`, `assert(node)`, `assert_named(name, node)`, `assume(node)`.
 
-**Request building**: `build_solve_request(budget_ms) → bytes`, `build_simplify_request() → bytes`, `build_minimize_request(target, signed, budget_ms) → bytes`.
+**Request building**: `build_solve_request(budget_ms) → bytes`, `build_simplify_request(target) → bytes`, `build_minimize_request(target, signed, budget_ms) → bytes`.
 
 **Response reading**: `parse_response(bytes) → Response` which exposes `status`, `model` (as an iterator of symbol→value pairs), `core` (as a list of assertion names), or `simplified_expr` (as a new buffer view).
 
@@ -662,7 +652,7 @@ Strict v1 validation rules:
 - Every child/root/target/model node reference must have an index `< node_count` and a sort bit matching the referenced node's tag-derived sort.
 - Every child reference must point to an earlier node index than the parent, enforcing bottom-up acyclic construction.
 - Assertion roots and assumption roots must be Bool refs.
-- `target_node` must be a BV ref for `MINIMIZE`/`MAXIMIZE`.
+- `target_node` must be a BV or Bool ref for `SIMPLIFY`, a BV ref for `MINIMIZE`/`MAXIMIZE`, and zero for `SOLVE`.
 - Bool-producing nodes must have `width = 0`; BV-producing nodes must have `width` in `1..65536`.
 - BV binary operands must have equal widths; comparison and overflow operands must have equal widths.
 - `BV_EXTRACT` must satisfy `0 <= aux_lo <= aux_hi < child_width`, and result width must be `aux_hi - aux_lo + 1`.

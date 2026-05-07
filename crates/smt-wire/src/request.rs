@@ -137,10 +137,14 @@ impl BinaryRequest {
         let assumption_count = u16::try_from(assumption_roots.len()).map_err(|_| {
             WireError::invalid("request assumptions", "assumption count exceeds u16::MAX")
         })?;
-        if matches!(command, Command::Minimize | Command::Maximize) && target_node.is_none() {
+        if matches!(
+            command,
+            Command::Simplify | Command::Minimize | Command::Maximize
+        ) && target_node.is_none()
+        {
             return Err(WireError::invalid(
                 "request target_node",
-                "MINIMIZE/MAXIMIZE require a BV target node",
+                "SIMPLIFY/MINIMIZE/MAXIMIZE require a target node",
             ));
         }
         let target_node_raw = target_node.map(NodeRef::raw).unwrap_or(0);
@@ -302,6 +306,19 @@ impl BinaryRequest {
         }
         validate_command_flags(self.envelope.command, self.envelope.flags)?;
         match self.envelope.command {
+            Command::Simplify => {
+                if !self.assertion_roots.is_empty()
+                    || !self.named_assertion_refs.is_empty()
+                    || !self.assumption_roots.is_empty()
+                {
+                    return Err(WireError::invalid(
+                        "simplify request",
+                        "SIMPLIFY accepts a single target expression, not assertions or assumptions",
+                    ));
+                }
+                let target = NodeRef::from_raw(self.envelope.target_node);
+                validate_node_ref(&expr, target, target.sort(), "target_node")?;
+            }
             Command::Minimize | Command::Maximize => {
                 validate_node_ref(
                     &expr,
@@ -310,11 +327,11 @@ impl BinaryRequest {
                     "target_node",
                 )?;
             }
-            Command::Solve | Command::Simplify => {
+            Command::Solve => {
                 if self.envelope.target_node != 0 {
                     return Err(WireError::invalid(
                         "request target_node",
-                        "target_node is only valid for optimization commands",
+                        "target_node is only valid for SIMPLIFY/MINIMIZE/MAXIMIZE commands",
                     ));
                 }
             }
@@ -328,10 +345,10 @@ impl BinaryRequest {
 
     pub fn target_ref(&self) -> Option<NodeRef> {
         match self.envelope.command {
-            Command::Minimize | Command::Maximize => {
+            Command::Simplify | Command::Minimize | Command::Maximize => {
                 Some(NodeRef::from_raw(self.envelope.target_node))
             }
-            Command::Solve | Command::Simplify => None,
+            Command::Solve => None,
         }
     }
 }

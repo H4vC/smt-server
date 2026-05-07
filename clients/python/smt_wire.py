@@ -152,9 +152,7 @@ class ModelEntry:
 @dataclass(frozen=True)
 class SimplifyResult:
     expression: bytes
-    assertion_roots: list[int]
-    named_assertion_refs: list[tuple[int, int]]
-    assumption_roots: list[int]
+    target_node: int
 
 
 @dataclass(frozen=True)
@@ -470,13 +468,22 @@ class Builder:
         return self._expr_bytes(new_nodes, new_children, self.blob), old_to_new
 
     def build_request(self, request_id: int, command: int, flags: int = 0, budget_ms: int = 0, target: Optional[int] = None) -> bytes:
-        named = [(r, n) for r, n in self.assertions if n is not None]
-        unnamed = [(r, n) for r, n in self.assertions if n is None]
-        assertions = named + unnamed
-        roots = [r for r, _ in assertions] + self.assumptions + ([target] if target is not None else [])
+        if command == SIMPLIFY:
+            if target is None:
+                raise ValueError("SIMPLIFY requires a target expression")
+            self._meta(target)
+            named: list[tuple[int, Optional[tuple[int, int]]]] = []
+            assertions: list[tuple[int, Optional[tuple[int, int]]]] = []
+            source_assumptions: list[int] = []
+        else:
+            named = [(r, n) for r, n in self.assertions if n is not None]
+            unnamed = [(r, n) for r, n in self.assertions if n is None]
+            assertions = named + unnamed
+            source_assumptions = self.assumptions
+        roots = [r for r, _ in assertions] + source_assumptions + ([target] if target is not None else [])
         expr, remap = self._compact(roots)
         assertion_roots = [remap[ref_index(r)] for r, _ in assertions]
-        assumption_roots = [remap[ref_index(r)] for r in self.assumptions]
+        assumption_roots = [remap[ref_index(r)] for r in source_assumptions]
         target_raw = remap[ref_index(target)] if target is not None else 0
         out = bytearray(REQUEST_MAGIC + struct.pack("<I", request_id) + bytes([command, flags]) + struct.pack("<I", budget_ms) + struct.pack("<I", len(expr)) + struct.pack("<HHH", len(assertion_roots), len(named), len(assumption_roots)) + struct.pack("<I", target_raw) + bytes(4))
         out.extend(expr)
@@ -491,8 +498,8 @@ class Builder:
         flags = (WANT_MODEL if want_model else 0) | (WANT_CORE if want_core else 0)
         return self.build_request(request_id, SOLVE, flags, budget_ms)
 
-    def build_simplify_request(self, request_id: int) -> bytes:
-        return self.build_request(request_id, SIMPLIFY)
+    def build_simplify_request(self, request_id: int, target: int) -> bytes:
+        return self.build_request(request_id, SIMPLIFY, target=target)
 
     def build_minimize_request(self, request_id: int, target: int, signed: bool = False, budget_ms: int = 0, want_model: bool = False) -> bytes:
         self._expect_bv(target)
@@ -624,30 +631,15 @@ def parse_core(payload: bytes) -> list[str]:
 
 
 def parse_simplify(payload: bytes) -> SimplifyResult:
-    _need(payload, 0, 12, "simplify header")
-    expr_len, assertion_count, named_count, assumption_count, reserved = struct.unpack_from("<IHHHH", payload, 0)
-    if reserved != 0:
-        raise ValueError("simplify reserved field is not zero")
-    if named_count > assertion_count:
-        raise ValueError("named_count exceeds assertion_count")
-    offset = 12
+    _need(payload, 0, 8, "simplify header")
+    expr_len, target_node = struct.unpack_from("<II", payload, 0)
+    offset = 8
     _need(payload, offset, expr_len, "simplify expression")
     expression = bytes(payload[offset:offset + expr_len])
     offset += expr_len
-    _need(payload, offset, assertion_count * 4, "simplify assertion roots")
-    assertion_roots = list(struct.unpack_from(f"<{assertion_count}I", payload, offset)) if assertion_count else []
-    offset += assertion_count * 4
-    named_assertion_refs: list[tuple[int, int]] = []
-    for _ in range(named_count):
-        _need(payload, offset, 8, "simplify named ref")
-        named_assertion_refs.append(struct.unpack_from("<II", payload, offset))
-        offset += 8
-    _need(payload, offset, assumption_count * 4, "simplify assumption roots")
-    assumption_roots = list(struct.unpack_from(f"<{assumption_count}I", payload, offset)) if assumption_count else []
-    offset += assumption_count * 4
     if offset != len(payload):
         raise ValueError("trailing bytes in simplify block")
-    return SimplifyResult(expression, assertion_roots, named_assertion_refs, assumption_roots)
+    return SimplifyResult(expression, target_node)
 
 
 def parse_optimization(payload: bytes, has_model: bool = False) -> OptimizationResult:

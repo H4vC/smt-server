@@ -37,10 +37,9 @@ pub fn response_from_query_result(
     request: &BinaryRequest,
     result: QueryResult,
 ) -> smt_wire::Result<BinaryResponse> {
-    let request_id = request.envelope.request_id;
     match request.envelope.command {
         Command::Solve => solve_response(request, result),
-        Command::Simplify => simplify_response(request_id, result),
+        Command::Simplify => simplify_response(request, result),
         Command::Minimize | Command::Maximize => optimize_response(request, result),
     }
 }
@@ -115,13 +114,17 @@ fn unknown_response(request_id: u32, message: Option<String>) -> smt_wire::Resul
     }
 }
 
-fn simplify_response(request_id: u32, result: QueryResult) -> smt_wire::Result<BinaryResponse> {
+fn simplify_response(
+    request: &BinaryRequest,
+    result: QueryResult,
+) -> smt_wire::Result<BinaryResponse> {
+    let request_id = request.envelope.request_id;
     match result.status {
         QueryStatus::Ok => {
             let simplify = result.simplify.ok_or_else(|| {
                 WireError::invalid("simplify response", "OK result without simplify block")
             })?;
-            if let Err(err) = validate_simplify(&simplify) {
+            if let Err(err) = validate_simplify(request, &simplify) {
                 return BinaryResponse::error(
                     request_id,
                     &format!("invalid backend simplify block: {err}"),
@@ -170,8 +173,36 @@ fn validate_unsat_core(request: &BinaryRequest, core: &UnsatCoreBlock) -> smt_wi
     Ok(())
 }
 
-fn validate_simplify(simplify: &SimplifyBlock) -> smt_wire::Result<()> {
-    simplify.validate()
+fn validate_simplify(request: &BinaryRequest, simplify: &SimplifyBlock) -> smt_wire::Result<()> {
+    simplify.validate()?;
+    let request_target = request
+        .target_ref()
+        .ok_or_else(|| WireError::invalid("simplify response", "missing target node"))?;
+    let request_expr = request.expression_view()?;
+    let request_node = validate_node_ref(
+        &request_expr,
+        request_target,
+        request_target.sort(),
+        "simplify request target",
+    )?;
+    let response_buffer = simplify.expression_buffer()?;
+    let response_expr = response_buffer.view()?;
+    let response_node = validate_node_ref(
+        &response_expr,
+        simplify.target_node,
+        request_target.sort(),
+        "simplify response target",
+    )?;
+    if response_node.width != request_node.width {
+        return Err(WireError::invalid(
+            "simplify response target",
+            format!(
+                "request target width {} but response target width {}",
+                request_node.width, response_node.width
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_optimization(

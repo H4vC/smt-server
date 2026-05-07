@@ -18,7 +18,7 @@ int main() {
         0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x78,0x02,0x00,0x00,0x80
     };
     assert(bytes == expected);
-    auto simplify = b.build_simplify_request(2);
+    auto simplify = b.build_simplify_request(2, x);
     assert(simplify[8] == smt_wire::command::SIMPLIFY);
     auto minimize = b.build_minimize_request(3, x, true, 0, true);
     assert(minimize[8] == smt_wire::command::MINIMIZE);

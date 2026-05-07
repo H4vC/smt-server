@@ -228,8 +228,9 @@ impl ExprBuilder {
         self.build_request(request_id, Command::Solve, flags, budget_ms, None)
     }
 
-    pub fn build_simplify_request(&self, request_id: u32) -> Result<Vec<u8>> {
-        self.build_request(request_id, Command::Simplify, 0, 0, None)
+    pub fn build_simplify_request(&self, request_id: u32, target: NodeRef) -> Result<Vec<u8>> {
+        self.meta_for(target)?;
+        self.build_request(request_id, Command::Simplify, 0, 0, Some(target))
     }
 
     pub fn build_minimize_request(
@@ -290,28 +291,34 @@ impl ExprBuilder {
         budget_ms: u32,
         target: Option<NodeRef>,
     ) -> Result<Vec<u8>> {
-        let mut named = Vec::new();
-        let mut unnamed = Vec::new();
-        for assertion in &self.assertions {
-            if assertion.name.is_some() {
-                named.push(*assertion);
+        let (ordered_assertions, named_refs, source_assumptions) =
+            if matches!(command, Command::Simplify) {
+                (Vec::new(), Vec::new(), Vec::new())
             } else {
-                unnamed.push(*assertion);
-            }
-        }
-        let ordered_assertions = named
-            .iter()
-            .copied()
-            .chain(unnamed.iter().copied())
-            .collect::<Vec<_>>();
-        let named_refs = named
-            .iter()
-            .map(|assertion| assertion.name.expect("named assertion has name"))
-            .collect::<Vec<_>>();
+                let mut named = Vec::new();
+                let mut unnamed = Vec::new();
+                for assertion in &self.assertions {
+                    if assertion.name.is_some() {
+                        named.push(*assertion);
+                    } else {
+                        unnamed.push(*assertion);
+                    }
+                }
+                let ordered_assertions = named
+                    .iter()
+                    .copied()
+                    .chain(unnamed.iter().copied())
+                    .collect::<Vec<_>>();
+                let named_refs = named
+                    .iter()
+                    .map(|assertion| assertion.name.expect("named assertion has name"))
+                    .collect::<Vec<_>>();
+                (ordered_assertions, named_refs, self.assumptions.clone())
+            };
 
         let mut live_roots = Vec::new();
         live_roots.extend(ordered_assertions.iter().map(|assertion| assertion.root));
-        live_roots.extend(self.assumptions.iter().copied());
+        live_roots.extend(source_assumptions.iter().copied());
         if let Some(target) = target {
             live_roots.push(target);
         }
@@ -320,8 +327,7 @@ impl ExprBuilder {
             .iter()
             .map(|assertion| compacted.remap_ref(assertion.root))
             .collect::<Result<Vec<_>>>()?;
-        let assumption_roots = self
-            .assumptions
+        let assumption_roots = source_assumptions
             .iter()
             .map(|root| compacted.remap_ref(*root))
             .collect::<Result<Vec<_>>>()?;

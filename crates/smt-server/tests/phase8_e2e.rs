@@ -3,8 +3,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use smt_server::{serve_tcp, BinbitBackend, RacingBackend, ServerConfig, Z3Backend};
-use smt_wire::{response_flags, ExprBuilder, ModelBlock, Status, TcpClient};
+use smt_server::{
+    serve_tcp, BinbitBackend, CommandRouterBackend, RacingBackend, RumbaBackend, ServerConfig,
+    Z3Backend,
+};
+use smt_wire::{response_flags, ExprBuilder, ModelBlock, SimplifyBlock, Status, TcpClient};
 
 fn start_default_test_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -12,10 +15,11 @@ fn start_default_test_server() -> SocketAddr {
     drop(listener);
 
     thread::spawn(move || {
-        let backend = Arc::new(RacingBackend::new(vec![
+        let solver = Arc::new(RacingBackend::new(vec![
             Arc::new(Z3Backend),
             Arc::new(BinbitBackend),
         ]));
+        let backend = Arc::new(CommandRouterBackend::new(Arc::new(RumbaBackend), solver));
         let _ = serve_tcp(addr, ServerConfig::new(backend));
     });
 
@@ -62,6 +66,27 @@ fn live_tcp_server_handles_binary_text_and_cached_requests() {
     assert_eq!(second.envelope.request_id, 0x2002);
     assert_eq!(first.envelope.status, Status::Sat);
     assert_eq!(second.envelope.status, Status::Sat);
+
+    let mut simplify_builder = ExprBuilder::new();
+    let sx = simplify_builder.bv_var("v0", 8).unwrap();
+    let zero = simplify_builder.bv_const(0, 8).unwrap();
+    let simplify_target = simplify_builder.bv_add(sx, zero).unwrap();
+    let simplify_request = simplify_builder
+        .build_simplify_request(0x3001, simplify_target)
+        .unwrap();
+    let simplify_response = client.send_binary_request(&simplify_request).unwrap();
+    assert_eq!(simplify_response.envelope.status, Status::Ok);
+    let simplify_block = SimplifyBlock::decode(&simplify_response.payload).unwrap();
+    assert!(simplify_block.target_node.is_bv());
+    assert_eq!(
+        simplify_block
+            .expression_buffer()
+            .unwrap()
+            .view()
+            .unwrap()
+            .node_count(),
+        1
+    );
 
     let text_script = r#"
         #| yaspar parses block comments in the live text path |#

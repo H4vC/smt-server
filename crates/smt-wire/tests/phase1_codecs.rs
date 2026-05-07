@@ -183,10 +183,8 @@ fn response_payload_codecs_round_trip() {
     assert_eq!(ModelBlock::decode(&model_bytes).unwrap(), model);
 
     let simplify = SimplifyBlock {
-        expression: ExpressionBuffer::empty().into_bytes(),
-        assertion_roots: vec![],
-        named_assertion_refs: vec![],
-        assumption_roots: vec![],
+        expression: expr.as_bytes().to_vec(),
+        target_node: x,
     };
     let simplify_bytes = simplify.encode().unwrap();
     assert_eq!(SimplifyBlock::decode(&simplify_bytes).unwrap(), simplify);

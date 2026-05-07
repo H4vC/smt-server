@@ -5,7 +5,7 @@ A small SMT solving server and wire-format toolkit for bit-vector and Boolean fo
 The project provides:
 
 - a TCP server that accepts either the project binary wire format or SMT-LIB text frames
-- native solver backends using the Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate, raced by default
+- a Rumba-backed expression simplifier and native solver backends using the Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate
 - a Rust wire-format crate (`smt-wire`) with a blocking TCP client
 - single-file Python and C++ client helpers for building requests, sending them, and decoding responses
 
@@ -138,6 +138,12 @@ python clients/tests/test_python_client.py
 python clients/tests/test_live_server.py   # also exercises the live C++ TCP client when a compiler is available
 ```
 
+The Rumba CSV dataset integration test samples `../rumba/third_party/dataset` by default. To run the full CSV suite through the binary simplify path:
+
+```sh
+SMT_SERVER_RUMBA_FULL_DATASET=1 cargo test -p smt-server --test rumba_simplify -- --nocapture
+```
+
 Optional production-validation gates for `qfbvsmtrs`:
 
 ```sh
@@ -159,7 +165,7 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 
 - `crates/smt-wire` — Rust wire-format types, builders, codecs, and validators
 - `crates/qfbvsmtrs` — standalone pure-Rust QF_BV bit-blasting solver crate and CLI
-- `crates/smt-server` — TCP server, backend integration, SMT-LIB frontend
+- `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend
 - `clients/python` — Python single-file client helper
 - `clients/cpp` — C++17 single-header client helper
 - `docs/smt-wire-format-plan.md` — detailed binary wire-format plan

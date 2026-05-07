@@ -9,9 +9,10 @@ use smt_wire::{
 #[test]
 fn simplify_returns_simplify_block() {
     let mut builder = ExprBuilder::new();
-    let t = builder.bool_true().unwrap();
-    builder.assert(t).unwrap();
-    let request = builder.build_simplify_request(21).unwrap();
+    let x = builder.bv_var("x", 8).unwrap();
+    let one = builder.bv_const(1, 8).unwrap();
+    let target = builder.bv_add(x, one).unwrap();
+    let request = builder.build_simplify_request(21, target).unwrap();
     let response = handle_binary_frame(&request, &BinbitBackend)
         .unwrap()
         .encode()
@@ -20,8 +21,9 @@ fn simplify_returns_simplify_block() {
     assert_eq!(response.envelope.status, Status::Ok);
     assert_eq!(response.envelope.flags, response_flags::HAS_EXPR);
     let block = SimplifyBlock::decode(&response.payload).unwrap();
-    assert_eq!(block.assertion_roots.len(), 1);
-    assert_eq!(block.assumption_roots.len(), 0);
+    assert!(block.target_node.is_bv());
+    let expr = block.expression_buffer().unwrap();
+    assert_eq!(expr.view().unwrap().node_count(), 3);
 }
 
 #[test]
