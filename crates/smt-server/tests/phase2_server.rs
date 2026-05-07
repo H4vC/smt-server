@@ -9,9 +9,126 @@ use smt_server::{
     ServerConfig, Z3Backend,
 };
 use smt_wire::{
-    le, response_flags, status, tag, BinaryRequest, BinaryResponse, Command, ExprBuilder,
+    le, response_flags, status, tag, BinaryRequest, BinaryResponse, BlobRef, Command, ExprBuilder,
     ExpressionBuffer, ModelBlock, NodeRef, RawNode, Status, UnsatCoreBlock,
 };
+
+fn request_with_duplicate_bv_symbol_not_equal(request_id: u32) -> Vec<u8> {
+    let x = BlobRef::new(0, 1).to_payload();
+    let expression = ExpressionBuffer::from_parts(
+        &[
+            RawNode::new(tag::BV_VAR, 0, 0, 4, 0, 0, x),
+            RawNode::new(tag::BV_VAR, 0, 0, 4, 0, 0, x),
+            RawNode::new(tag::BV_EQ, 2, 0, 0, 0, 0, 0),
+            RawNode::new(tag::BOOL_NOT, 1, 0, 0, 0, 2, 0),
+        ],
+        &[
+            NodeRef::bv(0).unwrap(),
+            NodeRef::bv(1).unwrap(),
+            NodeRef::bool(2).unwrap(),
+        ],
+        b"x",
+    )
+    .unwrap()
+    .into_bytes();
+    BinaryRequest::new(
+        request_id,
+        Command::Solve,
+        0,
+        0,
+        expression,
+        vec![NodeRef::bool(3).unwrap()],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+fn request_with_duplicate_bv_symbol_model(request_id: u32) -> Vec<u8> {
+    let x = BlobRef::new(0, 1).to_payload();
+    let expression = ExpressionBuffer::from_parts(
+        &[
+            RawNode::new(tag::BV_VAR, 0, 0, 4, 0, 0, x),
+            RawNode::new(tag::BV_VAR, 0, 0, 4, 0, 0, x),
+            RawNode::new(tag::BV_CONST, 0, 0, 4, 0, 0, 3),
+            RawNode::new(tag::BV_EQ, 2, 0, 0, 0, 0, 0),
+        ],
+        &[NodeRef::bv(0).unwrap(), NodeRef::bv(2).unwrap()],
+        b"x",
+    )
+    .unwrap()
+    .into_bytes();
+    BinaryRequest::new(
+        request_id,
+        Command::Solve,
+        smt_wire::request_flags::WANT_MODEL,
+        0,
+        expression,
+        vec![NodeRef::bool(3).unwrap()],
+        vec![],
+        vec![],
+        None,
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+#[test]
+fn solve_backends_intern_duplicate_wire_bv_symbols_by_name() {
+    let binbit = BinbitBackend;
+    let z3 = Z3Backend;
+    let qfbvsmtrs = QfbvsmtrsBackend;
+    for (name, backend) in [
+        ("binbit", &binbit as &dyn Backend),
+        ("z3", &z3 as &dyn Backend),
+        ("qfbvsmtrs", &qfbvsmtrs as &dyn Backend),
+    ] {
+        let request = request_with_duplicate_bv_symbol_not_equal(0x4455_5000);
+        let response = handle_binary_frame(&request, backend)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let response = BinaryResponse::parse(&response).unwrap();
+        assert_eq!(response.envelope.status, Status::Unsat, "{name}");
+    }
+}
+
+#[test]
+fn solve_backends_return_models_for_duplicate_wire_bv_symbols() {
+    let binbit = BinbitBackend;
+    let z3 = Z3Backend;
+    let qfbvsmtrs = QfbvsmtrsBackend;
+    for (name, backend) in [
+        ("binbit", &binbit as &dyn Backend),
+        ("z3", &z3 as &dyn Backend),
+        ("qfbvsmtrs", &qfbvsmtrs as &dyn Backend),
+    ] {
+        let request = request_with_duplicate_bv_symbol_model(0x4455_5001);
+        let response = handle_binary_frame(&request, backend)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let response = BinaryResponse::parse(&response).unwrap();
+        assert_eq!(response.envelope.status, Status::Sat, "{name}");
+        let model = ModelBlock::decode(&response.payload).unwrap();
+        let first = model
+            .entries
+            .iter()
+            .find(|entry| entry.node_ref == NodeRef::bv(0).unwrap())
+            .unwrap_or_else(|| panic!("{name}: missing first x"));
+        let second = model
+            .entries
+            .iter()
+            .find(|entry| entry.node_ref == NodeRef::bv(1).unwrap())
+            .unwrap_or_else(|| panic!("{name}: missing second x"));
+        assert_eq!(first.value.bytes, vec![3], "{name}");
+        assert_eq!(second.value.bytes, vec![3], "{name}");
+    }
+}
 
 #[test]
 fn binbit_backend_solves_sat_with_model() {

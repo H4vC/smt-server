@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -86,13 +87,16 @@ public:
     std::vector<Assertion> assertions;
     std::vector<uint32_t> assumptions;
     std::vector<size_t> scopes;
+    std::unordered_map<std::string, uint32_t> bv_vars;
+    std::unordered_map<std::string, uint32_t> bool_vars;
+    std::unordered_map<std::string, Meta> symbols;
 
     void reset() { *this = Builder(); }
     void push() { scopes.push_back(assertions.size()); }
     void pop() { if (scopes.empty()) throw std::invalid_argument("pop without push"); assertions.resize(scopes.back()); scopes.pop_back(); }
 
-    uint32_t bv_var(const std::string& name, uint32_t width) { check_width(width); auto b = add_blob(name); return add(tag::BV_VAR, width, {}, 0, 0, blob_payload(b.first, b.second)); }
-    uint32_t bool_var(const std::string& name) { auto b = add_blob(name); return add(tag::BOOL_VAR, 0, {}, 0, 0, blob_payload(b.first, b.second)); }
+    uint32_t bv_var(const std::string& name, uint32_t width) { check_width(width); check_symbol(name, {false, width}); auto it = bv_vars.find(name); if (it != bv_vars.end()) return it->second; auto b = add_blob(name); uint32_t ref = add(tag::BV_VAR, width, {}, 0, 0, blob_payload(b.first, b.second)); bv_vars.emplace(name, ref); return ref; }
+    uint32_t bool_var(const std::string& name) { check_symbol(name, {true, 0}); auto it = bool_vars.find(name); if (it != bool_vars.end()) return it->second; auto b = add_blob(name); uint32_t ref = add(tag::BOOL_VAR, 0, {}, 0, 0, blob_payload(b.first, b.second)); bool_vars.emplace(name, ref); return ref; }
     uint32_t bool_true() { return add(tag::BOOL_TRUE, 0); }
     uint32_t bool_false() { return add(tag::BOOL_FALSE, 0); }
 
@@ -181,6 +185,7 @@ public:
 
 private:
     static void check_width(uint32_t w) { if (w == 0 || w > MAX_WIDTH) throw std::invalid_argument("invalid BV width"); }
+    void check_symbol(const std::string& name, Meta signature) { auto it = symbols.find(name); if (it == symbols.end()) { symbols.emplace(name, signature); return; } if (it->second.is_bool != signature.is_bool || it->second.width != signature.width) throw std::invalid_argument("symbol used with incompatible sort or width"); }
     bool tag_is_bool(uint8_t t) const { return t >= tag::BOOL_TRUE; }
     std::pair<uint32_t,uint32_t> add_blob(const std::string& s) { return add_blob(std::vector<uint8_t>(s.begin(), s.end())); }
     std::pair<uint32_t,uint32_t> add_blob(const std::vector<uint8_t>& data) { uint32_t off = uint32_t(blob.size()); blob.insert(blob.end(), data.begin(), data.end()); return {off, uint32_t(data.size())}; }

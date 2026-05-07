@@ -214,10 +214,14 @@ fn response_payload_codecs_round_trip() {
 fn expression_builder_rejects_sort_and_width_errors() {
     let mut builder = ExprBuilder::new();
     let a8 = builder.bv_var("a", 8).unwrap();
+    assert_eq!(builder.bv_var("a", 8).unwrap(), a8);
+    assert!(builder.bv_var("a", 16).is_err());
+    assert!(builder.bool_var("a").is_err());
     let b16 = builder.bv_var("b", 16).unwrap();
     assert!(builder.bv_add(a8, b16).is_err());
 
     let p = builder.bool_var("p").unwrap();
+    assert_eq!(builder.bool_var("p").unwrap(), p);
     assert!(builder.bool_and(p, a8).is_err());
     assert!(builder.bv_extract(a8, 8, 0).is_err());
     assert!(builder.bv_zext(b16, u16::MAX).is_err());
@@ -253,6 +257,22 @@ fn malformed_inputs_are_rejected() {
         .unwrap()
         .validate()
         .is_err());
+
+    let duplicate_symbol_with_different_width = ExpressionBuffer::from_parts(
+        &[
+            RawNode::new(tag::BV_VAR, 0, 0, 8, 0, 0, 1),
+            RawNode::new(tag::BV_VAR, 0, 0, 16, 0, 0, 1),
+        ],
+        &[],
+        b"x",
+    )
+    .unwrap();
+    assert!(
+        ExprView::parse(&duplicate_symbol_with_different_width.into_bytes())
+            .unwrap()
+            .validate()
+            .is_err()
+    );
 
     let wrong_root_sort = BinaryRequest::new(
         1,

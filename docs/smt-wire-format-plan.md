@@ -108,6 +108,8 @@ Contiguous byte region storing variable-length data: symbol names (UTF-8) and wi
 | `BV_VAR`       | 0     | —                    | Blob ref to symbol name                            |
 | `BV_CONST`     | 0     | —                    | Inline value if width ≤ 64; blob ref otherwise     |
 
+Variable identity is by symbol name and sort, not by node identity. Multiple `BV_VAR` nodes with the same UTF-8 symbol and width denote the same SMT variable; using one symbol with incompatible sorts or BV widths is invalid.
+
 ### Bitvector unary
 
 | Tag       | Arity |
@@ -159,6 +161,8 @@ Contiguous byte region storing variable-length data: symbol names (UTF-8) and wi
 | `BOOL_TRUE`  | 0     | —                          |
 | `BOOL_FALSE` | 0     | —                          |
 | `BOOL_VAR`   | 0     | Blob ref to symbol name    |
+
+As with BV variables, repeated `BOOL_VAR` nodes with the same symbol denote one Bool variable.
 
 ### Bool connectives
 

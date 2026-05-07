@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::constants::{response_flags, Status, RESPONSE_ENVELOPE_LEN, RESPONSE_MAGIC};
 use crate::error::{Result, WireError};
 use crate::expr::{
@@ -382,7 +384,15 @@ impl ModelBlock {
     }
 
     pub fn validate_against_expr(&self, expr: &ExprView<'_>) -> Result<()> {
+        let mut seen_refs = HashSet::with_capacity(self.entries.len());
+        let mut symbol_values = HashMap::<(String, Sort, u32), ScalarValue>::new();
         for entry in &self.entries {
+            if !seen_refs.insert(entry.node_ref) {
+                return Err(WireError::invalid(
+                    "model node_ref",
+                    format!("duplicate model entry for node {}", entry.node_ref.index()),
+                ));
+            }
             let expected_sort = if entry.node_ref.is_bool() {
                 Sort::Bool
             } else {
@@ -395,7 +405,7 @@ impl ModelBlock {
                     format!("node {} is not a variable", entry.node_ref.index()),
                 ));
             }
-            match entry.node_ref.sort() {
+            let (symbol_sort, symbol_width, name_context) = match entry.node_ref.sort() {
                 Sort::Bool => {
                     if entry.value.width != 0 {
                         return Err(WireError::invalid(
@@ -403,6 +413,7 @@ impl ModelBlock {
                             "Bool variable has non-Bool scalar value",
                         ));
                     }
+                    (Sort::Bool, 0, "Bool variable")
                 }
                 Sort::Bv => {
                     if entry.value.width != node.width {
@@ -414,6 +425,17 @@ impl ModelBlock {
                             ),
                         ));
                     }
+                    (Sort::Bv, node.width, "BV variable")
+                }
+            };
+            let name = expr.blob_str(node.blob_ref(), name_context)?.to_owned();
+            let key = (name, symbol_sort, symbol_width);
+            if let Some(existing) = symbol_values.insert(key, entry.value.clone()) {
+                if existing != entry.value {
+                    return Err(WireError::invalid(
+                        "model value",
+                        "same symbol appears with inconsistent values",
+                    ));
                 }
             }
         }

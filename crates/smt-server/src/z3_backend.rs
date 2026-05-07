@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -145,13 +146,23 @@ fn translate(request: &BinaryRequest) -> smt_wire::Result<Z3Translation> {
         bools: vec![None; expr.node_count() as usize],
         variables: Vec::new(),
     };
+    let mut bv_vars = HashMap::<(String, u32), BV>::new();
+    let mut bool_vars = HashMap::<String, Bool>::new();
 
     for index in 0..expr.node_count() {
         let node = expr.node(index)?;
         match node.tag {
             tag::BV_VAR => {
-                let name = format!("bv_{index}");
-                let term = BV::new_const(name, node.width);
+                let name = expr
+                    .blob_str(BlobRef::from_payload(node.payload), "BV variable")?
+                    .to_owned();
+                let term = if let Some(term) = bv_vars.get(&(name.clone(), node.width)).cloned() {
+                    term
+                } else {
+                    let term = BV::new_const(format!("bv_{index}"), node.width);
+                    bv_vars.insert((name, node.width), term.clone());
+                    term
+                };
                 out.variables.push(Z3Variable {
                     node_ref: NodeRef::bv(index)?,
                     sort: Sort::Bv,
@@ -261,8 +272,16 @@ fn translate(request: &BinaryRequest) -> smt_wire::Result<Z3Translation> {
             tag::BOOL_TRUE => out.bools[index as usize] = Some(Bool::from_bool(true)),
             tag::BOOL_FALSE => out.bools[index as usize] = Some(Bool::from_bool(false)),
             tag::BOOL_VAR => {
-                let name = format!("bool_{index}");
-                let term = Bool::new_const(name);
+                let name = expr
+                    .blob_str(BlobRef::from_payload(node.payload), "Bool variable")?
+                    .to_owned();
+                let term = if let Some(term) = bool_vars.get(&name).cloned() {
+                    term
+                } else {
+                    let term = Bool::new_const(format!("bool_{index}"));
+                    bool_vars.insert(name, term.clone());
+                    term
+                };
                 out.variables.push(Z3Variable {
                     node_ref: NodeRef::bool(index)?,
                     sort: Sort::Bool,

@@ -193,6 +193,9 @@ class Builder:
         self.assertions: list[tuple[int, Optional[tuple[int, int]]]] = []
         self.assumptions: list[int] = []
         self.scopes: list[int] = []
+        self._bv_vars: dict[tuple[str, int], int] = {}
+        self._bool_vars: dict[str, int] = {}
+        self._symbols: dict[str, tuple[str, int]] = {}
 
     def reset(self) -> None:
         self.__init__()
@@ -253,10 +256,23 @@ class Builder:
             raise ValueError("BV width mismatch")
         return aw
 
+    def _check_symbol(self, name: str, signature: tuple[str, int]) -> None:
+        existing = self._symbols.get(name)
+        if existing is None:
+            self._symbols[name] = signature
+        elif existing != signature:
+            raise ValueError("symbol used with incompatible sort or width")
+
     def bv_var(self, name: str, width: int) -> int:
         if not 1 <= width <= MAX_WIDTH:
             raise ValueError("invalid BV width")
-        return self._push(BV_VAR, width, payload=blob_payload(*self._blob(name.encode())))
+        self._check_symbol(name, ("bv", width))
+        key = (name, width)
+        if key in self._bv_vars:
+            return self._bv_vars[key]
+        ref = self._push(BV_VAR, width, payload=blob_payload(*self._blob(name.encode())))
+        self._bv_vars[key] = ref
+        return ref
 
     def bv_const(self, value: int, width: int) -> int:
         if not 1 <= width <= MAX_WIDTH:
@@ -353,7 +369,13 @@ class Builder:
 
     def bool_true(self) -> int: return self._push(BOOL_TRUE, 0)
     def bool_false(self) -> int: return self._push(BOOL_FALSE, 0)
-    def bool_var(self, name: str) -> int: return self._push(BOOL_VAR, 0, payload=blob_payload(*self._blob(name.encode())))
+    def bool_var(self, name: str) -> int:
+        self._check_symbol(name, ("bool", 0))
+        if name in self._bool_vars:
+            return self._bool_vars[name]
+        ref = self._push(BOOL_VAR, 0, payload=blob_payload(*self._blob(name.encode())))
+        self._bool_vars[name] = ref
+        return ref
     def bool_not(self, x: int) -> int:
         self._expect_bool(x)
         return self._push(BOOL_NOT, 0, [x])

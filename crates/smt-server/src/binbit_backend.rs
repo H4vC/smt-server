@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use binbit::{BoolTerm, BvTerm, SmtResult, SmtSolver};
@@ -106,6 +107,8 @@ fn translate_with_context(
         bools: vec![None; expr.node_count() as usize],
         variables: Vec::new(),
     };
+    let mut bv_vars = HashMap::<(String, u32), BvTerm>::new();
+    let mut bool_vars = HashMap::<String, BoolTerm>::new();
 
     for index in 0..expr.node_count() {
         if index % 1024 == 0 && context.is_some_and(SolveContext::is_cancelled) {
@@ -117,7 +120,16 @@ fn translate_with_context(
         let node = expr.node(index)?;
         match node.tag {
             tag::BV_VAR => {
-                let term = out.solver.bv_var(node.width);
+                let name = expr
+                    .blob_str(BlobRef::from_payload(node.payload), "BV variable")?
+                    .to_owned();
+                let term = if let Some(term) = bv_vars.get(&(name.clone(), node.width)).copied() {
+                    term
+                } else {
+                    let term = out.solver.bv_var(node.width);
+                    bv_vars.insert((name, node.width), term);
+                    term
+                };
                 out.variables.push(BinbitVariable {
                     node_ref: NodeRef::bv(index)?,
                     sort: Sort::Bv,
@@ -239,7 +251,16 @@ fn translate_with_context(
             tag::BOOL_TRUE => out.bools[index as usize] = Some(out.solver.bool_true()),
             tag::BOOL_FALSE => out.bools[index as usize] = Some(out.solver.bool_false()),
             tag::BOOL_VAR => {
-                let term = out.solver.bool_var();
+                let name = expr
+                    .blob_str(BlobRef::from_payload(node.payload), "Bool variable")?
+                    .to_owned();
+                let term = if let Some(term) = bool_vars.get(&name).copied() {
+                    term
+                } else {
+                    let term = out.solver.bool_var();
+                    bool_vars.insert(name, term);
+                    term
+                };
                 out.variables.push(BinbitVariable {
                     node_ref: NodeRef::bool(index)?,
                     sort: Sort::Bool,

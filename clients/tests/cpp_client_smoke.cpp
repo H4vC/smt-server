@@ -6,6 +6,13 @@
 int main() {
     smt_wire::Builder b;
     auto x = b.bv_var("x", 8);
+    assert(b.bv_var("x", 8) == x);
+    bool bad_symbol_threw = false;
+    try { (void)b.bv_var("x", 16); } catch (const std::invalid_argument&) { bad_symbol_threw = true; }
+    assert(bad_symbol_threw);
+    bad_symbol_threw = false;
+    try { (void)b.bool_var("x"); } catch (const std::invalid_argument&) { bad_symbol_threw = true; }
+    assert(bad_symbol_threw);
     auto one = b.bv_const(1, 8);
     b.assert_(b.bv_eq(x, one));
     auto bytes = b.build_solve_request(0x01020304u, 500, true, false);
@@ -18,6 +25,9 @@ int main() {
         0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x78,0x02,0x00,0x00,0x80
     };
     assert(bytes == expected);
+    smt_wire::Builder bools;
+    auto p = bools.bool_var("p");
+    assert(bools.bool_var("p") == p);
     auto simplify = b.build_simplify_request(2, x);
     assert(simplify[8] == smt_wire::command::SIMPLIFY);
     auto minimize = b.build_minimize_request(3, x, true, 0, true);

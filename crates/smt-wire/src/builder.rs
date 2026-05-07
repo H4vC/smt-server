@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::constants::{request_flags, Command, Tag};
 use crate::error::{Result, WireError};
 use crate::expr::{bytes_for_width, validate_bv_width_value, ExpressionBuffer, RawNode};
@@ -68,6 +70,9 @@ pub struct ExprBuilder {
     assertions: Vec<Assertion>,
     assumptions: Vec<NodeRef>,
     scopes: Vec<usize>,
+    bv_vars: HashMap<(String, u32), NodeRef>,
+    bool_vars: HashMap<String, NodeRef>,
+    symbols: HashMap<String, NodeMeta>,
 }
 
 impl ExprBuilder {
@@ -83,6 +88,9 @@ impl ExprBuilder {
         self.assertions.clear();
         self.assumptions.clear();
         self.scopes.clear();
+        self.bv_vars.clear();
+        self.bool_vars.clear();
+        self.symbols.clear();
     }
 
     pub fn node_count(&self) -> usize {
@@ -123,11 +131,14 @@ impl ExprBuilder {
         }
 
         let mut old_to_new = vec![None; self.nodes.len()];
+        let mut next_index = 0u32;
         for (old_index, is_live) in marked.iter().copied().enumerate() {
             if is_live {
                 let meta = self.meta[old_index];
-                let new_index = old_to_new.iter().filter(|entry| entry.is_some()).count() as u32;
-                old_to_new[old_index] = Some(NodeRef::new(meta.sort, new_index)?);
+                old_to_new[old_index] = Some(NodeRef::new(meta.sort, next_index)?);
+                next_index = next_index
+                    .checked_add(1)
+                    .ok_or(WireError::IntegerOverflow("compacted node index"))?;
             }
         }
 
@@ -349,8 +360,21 @@ impl ExprBuilder {
 
     pub fn bv_var(&mut self, name: &str, width: u32) -> Result<NodeRef> {
         validate_bv_width_value(width, "BV variable width")?;
+        self.expect_symbol_signature(
+            name,
+            NodeMeta {
+                sort: Sort::Bv,
+                width,
+            },
+        )?;
+        let key = (name.to_owned(), width);
+        if let Some(reference) = self.bv_vars.get(&key).copied() {
+            return Ok(reference);
+        }
         let payload = self.push_blob(name.as_bytes())?.to_payload();
-        self.push_node(Tag::BvVar, width, &[], 0, 0, payload)
+        let reference = self.push_node(Tag::BvVar, width, &[], 0, 0, payload)?;
+        self.bv_vars.insert(key, reference);
+        Ok(reference)
     }
 
     pub fn bv_const(&mut self, value: u64, width: u32) -> Result<NodeRef> {
@@ -553,8 +577,20 @@ impl ExprBuilder {
     }
 
     pub fn bool_var(&mut self, name: &str) -> Result<NodeRef> {
+        self.expect_symbol_signature(
+            name,
+            NodeMeta {
+                sort: Sort::Bool,
+                width: 0,
+            },
+        )?;
+        if let Some(reference) = self.bool_vars.get(name).copied() {
+            return Ok(reference);
+        }
         let payload = self.push_blob(name.as_bytes())?.to_payload();
-        self.push_node(Tag::BoolVar, 0, &[], 0, 0, payload)
+        let reference = self.push_node(Tag::BoolVar, 0, &[], 0, 0, payload)?;
+        self.bool_vars.insert(name.to_owned(), reference);
+        Ok(reference)
     }
 
     pub fn bool_not(&mut self, x: NodeRef) -> Result<NodeRef> {
@@ -714,6 +750,23 @@ impl ExprBuilder {
                 let not_both = self.bool_not(both)?;
                 self.assert(not_both)?;
             }
+        }
+        Ok(())
+    }
+
+    fn expect_symbol_signature(&mut self, name: &str, signature: NodeMeta) -> Result<()> {
+        if let Some(existing) = self.symbols.get(name).copied() {
+            if existing != signature {
+                return Err(WireError::invalid(
+                    "symbol declaration",
+                    format!(
+                        "symbol {name:?} is used with both {:?}/{} and {:?}/{}",
+                        existing.sort, existing.width, signature.sort, signature.width
+                    ),
+                ));
+            }
+        } else {
+            self.symbols.insert(name.to_owned(), signature);
         }
         Ok(())
     }

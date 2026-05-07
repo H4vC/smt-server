@@ -1,5 +1,7 @@
 #![cfg(feature = "wire")]
 
+use std::collections::HashMap;
+
 use crate::builder::Builder;
 use crate::error::{Error, Result};
 use crate::ir::TermId;
@@ -17,6 +19,8 @@ pub fn query_from_wire(request: &BinaryRequest) -> Result<Query> {
         .map_err(|err| Error::invalid("smt-wire expression", err.to_string()))?;
     let mut builder = Builder::new();
     let mut terms = vec![None; expr.node_count() as usize];
+    let mut bv_vars = HashMap::<(String, u32), TermId>::new();
+    let mut bool_vars = HashMap::<String, TermId>::new();
 
     for index in 0..expr.node_count() {
         let node = expr
@@ -26,29 +30,43 @@ pub fn query_from_wire(request: &BinaryRequest) -> Result<Query> {
             tag::BV_VAR => {
                 let name = expr
                     .blob_str(BlobRef::from_payload(node.payload), "BV variable")
-                    .map_err(|err| Error::invalid("smt-wire BV variable", err.to_string()))?;
-                builder.bv_var_external(
-                    name,
-                    node.width,
-                    Some(
-                        NodeRef::bv(index)
-                            .map_err(|err| Error::invalid("node ref", err.to_string()))?
-                            .raw(),
-                    ),
-                )?
+                    .map_err(|err| Error::invalid("smt-wire BV variable", err.to_string()))?
+                    .to_owned();
+                if let Some(term) = bv_vars.get(&(name.clone(), node.width)).copied() {
+                    term
+                } else {
+                    let term = builder.bv_var_external(
+                        &name,
+                        node.width,
+                        Some(
+                            NodeRef::bv(index)
+                                .map_err(|err| Error::invalid("node ref", err.to_string()))?
+                                .raw(),
+                        ),
+                    )?;
+                    bv_vars.insert((name, node.width), term);
+                    term
+                }
             }
             tag::BOOL_VAR => {
                 let name = expr
                     .blob_str(BlobRef::from_payload(node.payload), "Bool variable")
-                    .map_err(|err| Error::invalid("smt-wire Bool variable", err.to_string()))?;
-                builder.bool_var_external(
-                    name,
-                    Some(
-                        NodeRef::bool(index)
-                            .map_err(|err| Error::invalid("node ref", err.to_string()))?
-                            .raw(),
-                    ),
-                )?
+                    .map_err(|err| Error::invalid("smt-wire Bool variable", err.to_string()))?
+                    .to_owned();
+                if let Some(term) = bool_vars.get(&name).copied() {
+                    term
+                } else {
+                    let term = builder.bool_var_external(
+                        &name,
+                        Some(
+                            NodeRef::bool(index)
+                                .map_err(|err| Error::invalid("node ref", err.to_string()))?
+                                .raw(),
+                        ),
+                    )?;
+                    bool_vars.insert(name, term);
+                    term
+                }
             }
             tag::BV_CONST => {
                 let bytes = bv_const_bytes(&expr, node.width, node.payload)?;

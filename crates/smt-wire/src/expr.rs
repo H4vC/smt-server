@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::constants::{self, tag, Tag, EXPR_HEADER_LEN, NODE_RECORD_LEN};
 use crate::error::{Result, WireError};
 use crate::le;
@@ -321,6 +323,7 @@ impl<'a> ExprView<'a> {
 
     pub fn validate(&self) -> Result<()> {
         let mut meta = Vec::with_capacity(self.header.node_count as usize);
+        let mut symbols = HashMap::<&str, NodeInfo>::new();
         for index in 0..self.header.node_count {
             let node = self.node(index)?;
             let tag = parse_tag(node.tag, index)?;
@@ -328,7 +331,23 @@ impl<'a> ExprView<'a> {
             let sort = tag.result_sort();
             validate_node_width(index, tag, node.width)?;
             if matches!(tag, Tag::BvVar | Tag::BoolVar) {
-                self.blob_str(node.blob_ref(), "symbol name")?;
+                let name = self.blob_str(node.blob_ref(), "symbol name")?;
+                let signature = NodeInfo {
+                    tag,
+                    sort,
+                    width: node.width,
+                };
+                if let Some(existing) = symbols.insert(name, signature) {
+                    if existing.sort != signature.sort || existing.width != signature.width {
+                        return Err(WireError::invalid(
+                            "symbol declaration",
+                            format!(
+                                "symbol {name:?} is used with both {:?}/{} and {:?}/{}",
+                                existing.sort, existing.width, signature.sort, signature.width
+                            ),
+                        ));
+                    }
+                }
             }
             if matches!(tag, Tag::BvConst) && node.width > 64 {
                 let reference = node.blob_ref();

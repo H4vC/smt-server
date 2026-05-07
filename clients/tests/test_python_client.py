@@ -30,7 +30,19 @@ def test_python_client_validates_width_and_sort():
     b = smt.Builder()
     a = b.bv_var("a", 8)
     c = b.bv_var("c", 16)
+    assert b.bv_var("a", 8) == a
+    try:
+        b.bv_var("a", 16)
+        raise AssertionError("expected symbol width error")
+    except ValueError:
+        pass
+    try:
+        b.bool_var("a")
+        raise AssertionError("expected symbol sort error")
+    except ValueError:
+        pass
     p = b.bool_var("p")
+    assert b.bool_var("p") == p
     rotated = b.bv_rotate_left(a, 3)
     assert smt.is_bv_ref(rotated)
     assert b.build_minimize_request(3, a, signed=True, want_model=True).startswith(b"SMTQ")

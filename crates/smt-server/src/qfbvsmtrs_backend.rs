@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use smt_wire::{
-    BinaryRequest, Command, OptimizationValueBlock, ScalarValue, SimplifyBlock, UnsatCoreBlock,
-    WireError,
+    tag, BinaryRequest, BlobRef, Command, ModelBlock, ModelEntry, OptimizationValueBlock,
+    ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
 
 use crate::backend::{Backend, QueryResult, SolveContext};
@@ -54,6 +55,60 @@ fn scalar_to_wire(value: &qfbvsmtrs::ScalarValue) -> smt_wire::Result<ScalarValu
     match value {
         qfbvsmtrs::ScalarValue::Bool(value) => Ok(ScalarValue::bool(*value)),
         qfbvsmtrs::ScalarValue::Bv { width, bytes } => ScalarValue::bv(*width, bytes.clone()),
+    }
+}
+
+fn model_to_wire_for_request(
+    model: &qfbvsmtrs::Model,
+    request: &BinaryRequest,
+) -> smt_wire::Result<ModelBlock> {
+    let mut values = HashMap::<(String, Sort, u32), ScalarValue>::new();
+    for entry in &model.entries {
+        let value = scalar_to_wire(&entry.value)?;
+        let key = (entry.name.clone(), value_sort(&value), value.width);
+        if let Some(existing) = values.insert(key, value.clone()) {
+            if existing != value {
+                return Err(WireError::invalid(
+                    "qfbvsmtrs model",
+                    format!("inconsistent values for symbol {:?}", entry.name),
+                ));
+            }
+        }
+    }
+
+    let expr = request.expression_view()?;
+    let mut entries = Vec::new();
+    for index in 0..expr.node_count() {
+        let node = expr.node(index)?;
+        let (sort, width, name) = match node.tag {
+            tag::BV_VAR => (
+                Sort::Bv,
+                node.width,
+                expr.blob_str(BlobRef::from_payload(node.payload), "BV variable")?,
+            ),
+            tag::BOOL_VAR => (
+                Sort::Bool,
+                0,
+                expr.blob_str(BlobRef::from_payload(node.payload), "Bool variable")?,
+            ),
+            _ => continue,
+        };
+        let key = (name.to_owned(), sort, width);
+        if let Some(value) = values.get(&key).cloned() {
+            entries.push(ModelEntry {
+                node_ref: smt_wire::NodeRef::new(sort, index)?,
+                value,
+            });
+        }
+    }
+    Ok(ModelBlock { entries })
+}
+
+fn value_sort(value: &ScalarValue) -> Sort {
+    if value.width == 0 {
+        Sort::Bool
+    } else {
+        Sort::Bv
     }
 }
 
@@ -132,7 +187,7 @@ fn solve_on_worker(
     match result.status {
         qfbvsmtrs::SolveStatus::Sat => {
             let model = if let Some(model) = &result.model {
-                match qfbvsmtrs::model_to_wire(model) {
+                match model_to_wire_for_request(model, request) {
                     Ok(model) => Some(model),
                     Err(err) => return Ok(QueryResult::unknown(format!("qfbvsmtrs model: {err}"))),
                 }
