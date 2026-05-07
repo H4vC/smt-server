@@ -1,16 +1,35 @@
 # SMT Server
 
-A small SMT solving server and wire-format toolkit for bit-vector and Boolean formulas.
+SMT Server lets analysis tools build `QF_BV` formulas with small client libraries and delegate solving or simplification to a separate server.
 
-The project provides:
+It targets binary analysis, lifting, symbolic execution, and IR experiments where client projects need bit-vector queries but should avoid embedding solver build systems. A client constructs a flat binary DAG, sends a length-prefixed request, and receives a model, unsat core, optimum value, or simplified expression. The server owns the solver and simplifier integrations.
 
-- a TCP server that accepts either the project binary wire format or SMT-LIB text frames
-- a Rumba-backed expression simplifier and native solver backends using the Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate
-- a Rust wire-format crate (`smt-wire`) with a blocking TCP client
-- single-file Python and C++ client helpers for building requests, sending them, and decoding responses
+## Clients
 
-The supported logic is intentionally focused on quantifier-free bit-vectors and Booleans (`QF_BV`).
-SMT-LIB input is a compatibility frontend: it is parsed, lowered into the internal wire IR, and then sent to the configured backends.
+- C++: single C++17 header at `clients/cpp/smt_wire.hpp`.
+- Python: dependency-free module at `clients/python/smt_wire.py`.
+- Rust: `smt-wire` crate with builders, codecs, validators, and a blocking TCP client.
+
+## Backends
+
+- Solve and optimize: Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate.
+- Simplify: Rumba for supported 64-bit-or-smaller MBA expression islands.
+- Text compatibility: SMT-LIB `QF_BV` scripts are parsed into the same binary IR used by binary clients.
+
+The binary protocol is the main API. SMT-LIB support exists for tooling compatibility and test reuse.
+
+## Expression format
+
+Expressions are stored as one contiguous binary buffer:
+
+- nodes are fixed-size records in topological order;
+- children are typed integer references into the node array;
+- symbol names and wide constants live in a blob table;
+- the buffer contains no pointers.
+
+This layout makes requests cheap to copy, send, validate, hash, cache, and replay. The server validates the buffer and translates the flat DAG into backend-specific terms.
+
+Scope is limited to quantifier-free bit-vectors and Booleans. That covers the formulas commonly emitted by lifters, binary-analysis tools, and symbolic-execution engines.
 
 ## Build
 
@@ -26,22 +45,21 @@ cargo run -p smt-server -- 127.0.0.1:9123
 
 If no address is provided, the server listens on `127.0.0.1:9123`.
 
-Requests are sent as length-prefixed frames:
+Requests use length-prefixed frames:
 
 ```text
 u32 little-endian payload length
 payload bytes
 ```
 
-The payload may be either:
+Payload formats:
 
-- a binary `SMTQ` request produced by `smt-wire` or one of the clients
-- an SMT-LIB script as UTF-8 text
+- binary `SMTQ` request produced by `smt-wire` or one of the clients;
+- SMT-LIB script as UTF-8 text.
 
 ## Python client example
 
-The Python client is a dependency-free single file at `clients/python/smt_wire.py`.
-You can copy it into your project or add `clients/python` to `PYTHONPATH`.
+The Python client can be copied into a project or imported by adding `clients/python` to `PYTHONPATH`.
 
 ```python
 import smt_wire as smt
@@ -58,9 +76,28 @@ print(response.status)       # smt.SAT
 print(response.model()[0])
 ```
 
+## Simplification example
+
+`SIMPLIFY` requests send one expression root and return a new expression buffer plus the simplified root:
+
+```python
+import smt_wire as smt
+
+b = smt.Builder()
+x = b.bv_var("x", 64)
+target = b.bv_add(x, b.bv_const(0, 64))
+request = b.build_simplify_request(2, target)
+
+with smt.TcpClient("127.0.0.1", 9123) as client:
+    response = client.send_request(request)
+
+simplified = response.simplified()
+print(simplified.target_node)   # root node in simplified.expression
+```
+
 ## SMT-LIB text example
 
-You can also send an SMT-LIB script as the frame payload:
+A text frame can contain an SMT-LIB script:
 
 ```smt2
 (set-logic QF_BV)
@@ -70,9 +107,7 @@ You can also send an SMT-LIB script as the frame payload:
 (get-value (x))
 ```
 
-The text frontend supports the project’s `QF_BV`/Bool subset, including declarations, assertions, named assertions, `check-sat`, `check-sat-assuming`, `get-model`, `get-value`, `get-unsat-core`, `let`, and common bit-vector operations. It does not provide a stateful incremental SMT-LIB session; commands such as `push` and `pop` are rejected.
-
-From Python, send text with the same client:
+The text frontend supports declarations, assertions, named assertions, `check-sat`, `check-sat-assuming`, `get-model`, `get-value`, `get-unsat-core`, `let`, and common bit-vector operations. It rejects stateful incremental commands such as `push` and `pop`.
 
 ```python
 with smt.TcpClient("127.0.0.1", 9123) as client:
@@ -98,7 +133,7 @@ println!("{:?}", response.envelope.status);
 
 ## C++ client
 
-The C++ client helper is a dependency-free C++17 header:
+The C++ helper is a dependency-free C++17 header:
 
 ```cpp
 #include "smt_wire.hpp"
@@ -112,7 +147,7 @@ smt_wire::TcpClient client("127.0.0.1", 9123);
 auto response = client.send_request(request);
 ```
 
-On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` if you use `TcpClient`.
+On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `TcpClient`.
 
 ## Standalone qfbvsmtrs CLI
 
@@ -120,9 +155,9 @@ On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link
 cargo run -p qfbvsmtrs -- path/to/query.smt2
 ```
 
-If no path is supplied, `qfbvsmtrs` reads SMT-LIB from stdin. The default SAT backend is `splr` (CDCL); `varisat` and the internal DPLL solver remain selectable through `Config::with_sat_backend`.
+If no path is supplied, `qfbvsmtrs` reads SMT-LIB from stdin. The default SAT backend is `splr` (CDCL). `varisat` and the internal DPLL solver are selectable through `Config::with_sat_backend`.
 
-A lightweight benchmark runner is available for baseline timings:
+Benchmark runner:
 
 ```sh
 cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
@@ -135,16 +170,18 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 python clients/tests/test_python_client.py
-python clients/tests/test_live_server.py   # also exercises the live C++ TCP client when a compiler is available
+python clients/tests/test_live_server.py
 ```
 
-The Rumba CSV dataset integration test samples `../rumba/third_party/dataset` by default. To run the full CSV suite through the binary simplify path:
+`clients/tests/test_live_server.py` also exercises the live C++ TCP client when a compiler is available.
+
+The default Rumba integration test uses embedded samples. The full CSV dataset test needs Rumba's dataset directory; clone `https://github.com/thalium/rumba` next to this repository or set `SMT_SERVER_RUMBA_DATASET_DIR`. Run the full CSV suite through the binary simplify path with:
 
 ```sh
 SMT_SERVER_RUMBA_FULL_DATASET=1 cargo test -p smt-server --test rumba_simplify -- --nocapture
 ```
 
-Optional production-validation gates for `qfbvsmtrs`:
+Optional `qfbvsmtrs` validation gates:
 
 ```sh
 cargo test -p qfbvsmtrs --test differential_z3
@@ -154,7 +191,7 @@ QFBVSMTRS_SMTLIB_DIR=/path/to/SMT-LIB/QF_BV cargo test -p qfbvsmtrs --test diffe
 cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 ```
 
-A standalone C++ smoke test is also available:
+Standalone C++ smoke test:
 
 ```sh
 c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_client_smoke
@@ -163,12 +200,12 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 
 ## Repository layout
 
-- `crates/smt-wire` — Rust wire-format types, builders, codecs, and validators
-- `crates/qfbvsmtrs` — standalone pure-Rust QF_BV bit-blasting solver crate and CLI
-- `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend
-- `clients/python` — Python single-file client helper
-- `clients/cpp` — C++17 single-header client helper
-- `docs/smt-wire-format-plan.md` — detailed binary wire-format plan
-- `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates
-- `docs/qfbvsmtrs-corpus-results.md` — latest SMT-LIB QF_BV corpus-run results
-- `docs` — backend notes and evaluation details
+- `crates/smt-wire` — Rust wire-format types, builders, codecs, and validators.
+- `crates/qfbvsmtrs` — standalone pure-Rust `QF_BV` bit-blasting solver crate and CLI.
+- `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend.
+- `clients/python` — Python single-file client helper.
+- `clients/cpp` — C++17 single-header client helper.
+- `docs/smt-wire-format-plan.md` — binary wire-format details.
+- `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates.
+- `docs/qfbvsmtrs-corpus-results.md` — latest SMT-LIB `QF_BV` corpus-run results.
+- `docs` — backend notes and evaluation details.
