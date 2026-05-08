@@ -75,7 +75,7 @@ fn live_tcp_server_handles_binary_text_and_cached_requests() {
         .build_simplify_request(0x3001, simplify_target)
         .unwrap();
     let simplify_response = client.send_binary_request(&simplify_request).unwrap();
-    assert_eq!(simplify_response.envelope.status, Status::Ok);
+    assert_eq!(simplify_response.envelope.status, Status::Simplified);
     let simplify_block = SimplifyBlock::decode(&simplify_response.payload).unwrap();
     assert!(simplify_block.target_node.is_bv());
     assert_eq!(

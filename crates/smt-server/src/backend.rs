@@ -15,7 +15,7 @@ pub enum QueryStatus {
     Sat,
     Unsat,
     Unknown,
-    Ok,
+    Simplified,
 }
 
 /// Backend result before it is encoded as a wire response.
@@ -63,9 +63,9 @@ impl QueryResult {
         }
     }
 
-    pub fn ok_simplify(simplify: SimplifyBlock) -> Self {
+    pub fn simplified(simplify: SimplifyBlock) -> Self {
         Self {
-            status: QueryStatus::Ok,
+            status: QueryStatus::Simplified,
             model: None,
             core: None,
             simplify: Some(simplify),
@@ -88,14 +88,14 @@ impl QueryResult {
     pub fn is_conclusive(&self) -> bool {
         matches!(
             self.status,
-            QueryStatus::Sat | QueryStatus::Unsat | QueryStatus::Ok
+            QueryStatus::Sat | QueryStatus::Unsat | QueryStatus::Simplified
         )
     }
 
     pub fn is_conclusive_for(&self, request: &BinaryRequest) -> bool {
         let status_matches_command = match request.envelope.command {
             Command::Solve => matches!(self.status, QueryStatus::Sat | QueryStatus::Unsat),
-            Command::Simplify => self.status == QueryStatus::Ok,
+            Command::Simplify => self.status == QueryStatus::Simplified,
             Command::Minimize | Command::Maximize => {
                 matches!(self.status, QueryStatus::Sat | QueryStatus::Unsat)
             }
@@ -126,15 +126,18 @@ impl QueryResult {
                 .ok_or_else(|| WireError::invalid("solve result", "UNSAT without requested core"))
                 .and_then(|core| validate_unsat_core(request, core)),
             QueryStatus::Sat | QueryStatus::Unsat | QueryStatus::Unknown => Ok(()),
-            QueryStatus::Ok => Err(WireError::invalid("solve result", "SOLVE returned OK")),
+            QueryStatus::Simplified => Err(WireError::invalid(
+                "solve result",
+                "SOLVE returned SIMPLIFIED",
+            )),
         }
     }
 
     fn validate_simplify_artifacts(&self, request: &BinaryRequest) -> smt_wire::Result<()> {
         match self.status {
-            QueryStatus::Ok => {
+            QueryStatus::Simplified => {
                 let simplify = self.simplify.as_ref().ok_or_else(|| {
-                    WireError::invalid("simplify result", "OK without simplify block")
+                    WireError::invalid("simplify result", "SIMPLIFIED without simplify block")
                 })?;
                 validate_simplify_result(request, simplify)
             }
@@ -163,9 +166,9 @@ impl QueryResult {
                 validate_optimization(request, optimization)
             }
             QueryStatus::Unsat | QueryStatus::Unknown => Ok(()),
-            QueryStatus::Ok => Err(WireError::invalid(
+            QueryStatus::Simplified => Err(WireError::invalid(
                 "optimization result",
-                "optimization returned OK",
+                "optimization returned SIMPLIFIED",
             )),
         }
     }

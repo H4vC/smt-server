@@ -80,7 +80,7 @@ fn simplify_via_rumba_backend(expr: &RumbaExpr) -> SimplifyBlock {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(response.envelope.status, Status::Ok);
+    assert_eq!(response.envelope.status, Status::Simplified);
     SimplifyBlock::decode(&response.payload).unwrap()
 }
 

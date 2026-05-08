@@ -97,7 +97,9 @@ fn solve_response(
             }
         }
         QueryStatus::Unknown => unknown_response(request_id, result.message),
-        QueryStatus::Ok => BinaryResponse::error(request_id, "SOLVE backend returned OK"),
+        QueryStatus::Simplified => {
+            BinaryResponse::error(request_id, "SOLVE backend returned SIMPLIFIED")
+        }
     }
 }
 
@@ -120,9 +122,12 @@ fn simplify_response(
 ) -> smt_wire::Result<BinaryResponse> {
     let request_id = request.envelope.request_id;
     match result.status {
-        QueryStatus::Ok => {
+        QueryStatus::Simplified => {
             let simplify = result.simplify.ok_or_else(|| {
-                WireError::invalid("simplify response", "OK result without simplify block")
+                WireError::invalid(
+                    "simplify response",
+                    "SIMPLIFIED result without simplify block",
+                )
             })?;
             if let Err(err) = validate_simplify(request, &simplify) {
                 return BinaryResponse::error(
@@ -132,7 +137,7 @@ fn simplify_response(
             }
             BinaryResponse::new(
                 request_id,
-                Status::Ok,
+                Status::Simplified,
                 response_flags::HAS_EXPR,
                 simplify.encode()?,
             )
@@ -264,6 +269,8 @@ fn optimize_response(
         }
         QueryStatus::Unsat => BinaryResponse::new(request_id, Status::Unsat, 0, Vec::new()),
         QueryStatus::Unknown => unknown_response(request_id, result.message),
-        QueryStatus::Ok => BinaryResponse::error(request_id, "optimization backend returned OK"),
+        QueryStatus::Simplified => {
+            BinaryResponse::error(request_id, "optimization backend returned SIMPLIFIED")
+        }
     }
 }

@@ -336,7 +336,7 @@ pub mod request_flags {
 }
 
 pub mod status {
-    pub const OK: u8 = 0;
+    pub const SIMPLIFIED: u8 = 0;
     pub const SAT: u8 = 1;
     pub const UNSAT: u8 = 2;
     pub const UNKNOWN: u8 = 3;
@@ -346,7 +346,7 @@ pub mod status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Status {
-    Ok = status::OK,
+    Simplified = status::SIMPLIFIED,
     Sat = status::SAT,
     Unsat = status::UNSAT,
     Unknown = status::UNKNOWN,
@@ -358,7 +358,7 @@ impl TryFrom<u8> for Status {
 
     fn try_from(value: u8) -> core::result::Result<Self, ()> {
         Ok(match value {
-            status::OK => Status::Ok,
+            status::SIMPLIFIED => Status::Simplified,
             status::SAT => Status::Sat,
             status::UNSAT => Status::Unsat,
             status::UNKNOWN => Status::Unknown,

@@ -29,7 +29,7 @@ impl Backend for RumbaBackend {
 
     fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         match request.envelope.command {
-            Command::Simplify => simplify_request(request).map(QueryResult::ok_simplify),
+            Command::Simplify => simplify_request(request).map(QueryResult::simplified),
             Command::Solve | Command::Minimize | Command::Maximize => {
                 Ok(QueryResult::unknown("rumba only supports SIMPLIFY"))
             }

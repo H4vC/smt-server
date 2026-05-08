@@ -12,8 +12,8 @@ It targets binary analysis, lifting, symbolic execution, and IR experiments wher
 
 ## Backends
 
-- Solve and optimize: Rust `z3` crate, `binbit`, and the standalone `qfbvsmtrs` crate.
-- Simplify: Rumba for supported 64-bit-or-smaller MBA expression islands.
+- Solve and optimize: [`z3`](https://docs.rs/z3/latest/z3/), [`binbit`](https://github.com/bint-disasm/binbit), and the standalone `qfbvsmtrs` crate.
+- Simplify: [Rumba](https://github.com/thalium/rumba) for supported 64-bit-or-smaller MBA expression islands.
 - Text compatibility: SMT-LIB `QF_BV` scripts are parsed into the same binary IR used by binary clients.
 
 The binary protocol is the main API. SMT-LIB support exists for tooling compatibility and test reuse.
@@ -64,36 +64,41 @@ The Python client can be copied into a project or imported by adding `clients/py
 ```python
 import smt_wire as smt
 
-b = smt.Builder()
-x = b.bv_var("x", 8)
-b.assert_(b.bv_eq(x, b.bv_const(42, 8)))
-request = b.build_solve_request(1, want_model=True)
+ctx = smt.Context()
+x = ctx.bv_var("x", 8)
+ctx.assert_(ctx.bv_eq(x, 42))
 
-with smt.TcpClient("127.0.0.1", 9123) as client:
-    response = client.send_request(request)
+with smt.Client("127.0.0.1", 9123) as client:
+    response = client.solve(ctx)  # want_model=True by default
 
-print(response.status)       # smt.SAT
-print(response.model()[0])
+print(response.status)       # Status.SAT
+if response.model is not None:
+    for var, value in response.model.items():
+        print(f"{var.name} = {hex(int(value))}")
+
+# Dump a self-contained SMT-LIB script for debugging or external solvers.
+print(ctx.to_smt2())          # includes check-sat/get-model by default
 ```
 
 ## Simplification example
 
-`SIMPLIFY` requests send one expression root and return a new expression buffer plus the simplified root:
+`SIMPLIFY` requests send one expression root and return a typed term in a fresh result context:
 
 ```python
 import smt_wire as smt
 
-b = smt.Builder()
-x = b.bv_var("x", 64)
-target = b.bv_add(x, b.bv_const(0, 64))
-request = b.build_simplify_request(2, target)
+ctx = smt.Context()
+x = ctx.bv_var("x", 64)
+target = x + 0
 
-with smt.TcpClient("127.0.0.1", 9123) as client:
-    response = client.send_request(request)
+with smt.Client("127.0.0.1", 9123) as client:
+    simplified = client.simplify(target)
 
-simplified = response.simplified()
-print(simplified.target_node)   # root node in simplified.expression
+if simplified.term is not None:
+    print(simplified.term.to_smt2())  # full expansion by default
 ```
+
+`str(term)` still prints a one-layer debug view; use `term.to_smt2(depth=0)` for the same depth-limited form explicitly.
 
 ## SMT-LIB text example
 
@@ -110,8 +115,8 @@ A text frame can contain an SMT-LIB script:
 The text frontend supports declarations, assertions, named assertions, `check-sat`, `check-sat-assuming`, `get-model`, `get-value`, `get-unsat-core`, `let`, and common bit-vector operations. It rejects stateful incremental commands such as `push` and `pop`.
 
 ```python
-with smt.TcpClient("127.0.0.1", 9123) as client:
-    print(client.send_text(script))
+with smt.Client("127.0.0.1", 9123) as client:
+    print(client.smt2(script))
 ```
 
 ## Rust client

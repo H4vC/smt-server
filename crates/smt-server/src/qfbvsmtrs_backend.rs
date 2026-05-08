@@ -22,7 +22,7 @@ impl Backend for QfbvsmtrsBackend {
 
     fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         match request.envelope.command {
-            Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
+            Command::Simplify => Ok(QueryResult::simplified(SimplifyBlock {
                 expression: request.expression.clone(),
                 target_node: request
                     .target_ref()
@@ -211,8 +211,8 @@ fn solve_on_worker(
                 "qfbvsmtrs returned unknown".to_owned()
             })))
         }
-        qfbvsmtrs::SolveStatus::Ok => Ok(QueryResult::unknown(
-            "qfbvsmtrs returned OK for a solve request",
+        qfbvsmtrs::SolveStatus::Simplified => Ok(QueryResult::unknown(
+            "qfbvsmtrs returned SIMPLIFIED for a solve request",
         )),
     }
 }

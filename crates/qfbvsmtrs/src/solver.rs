@@ -16,7 +16,7 @@ pub enum SolveStatus {
     Sat,
     Unsat,
     Unknown,
-    Ok,
+    Simplified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,9 +69,9 @@ impl SolveResult {
         }
     }
 
-    pub fn ok() -> Self {
+    pub fn simplified() -> Self {
         Self {
-            status: SolveStatus::Ok,
+            status: SolveStatus::Simplified,
             model: None,
             core: None,
             optimum: None,
@@ -142,7 +142,7 @@ impl Solver {
             return Ok(SolveResult::unknown("cancelled"));
         }
         match query.command {
-            Command::Simplify => return Ok(SolveResult::ok()),
+            Command::Simplify => return Ok(SolveResult::simplified()),
             Command::Minimize | Command::Maximize => {
                 return Err(Error::internal(
                     "solve_once called with optimization command",
@@ -246,8 +246,10 @@ impl Solver {
             SolveStatus::Unknown => {
                 return Ok(SolveResult::unknown("optimization base query unknown"))
             }
-            SolveStatus::Ok => {
-                return Ok(SolveResult::unknown("optimization base query returned OK"))
+            SolveStatus::Simplified => {
+                return Ok(SolveResult::unknown(
+                    "optimization base query returned SIMPLIFIED",
+                ))
             }
         }
 
@@ -282,8 +284,10 @@ impl Solver {
                 SolveStatus::Unknown => {
                     return Ok(SolveResult::unknown("optimization bit query unknown"))
                 }
-                SolveStatus::Ok => {
-                    return Ok(SolveResult::unknown("optimization bit query returned OK"))
+                SolveStatus::Simplified => {
+                    return Ok(SolveResult::unknown(
+                        "optimization bit query returned SIMPLIFIED",
+                    ))
                 }
             }
         }
@@ -340,7 +344,7 @@ impl Solver {
                 .status
             {
                 SolveStatus::Unsat => active = trial_active,
-                SolveStatus::Sat | SolveStatus::Unknown | SolveStatus::Ok => pos += 1,
+                SolveStatus::Sat | SolveStatus::Unknown | SolveStatus::Simplified => pos += 1,
             }
         }
         Ok(active

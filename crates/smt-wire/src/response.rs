@@ -102,8 +102,8 @@ impl BinaryResponse {
         Ok(response)
     }
 
-    pub fn ok(request_id: u32, payload: Vec<u8>, flags: u8) -> Result<Self> {
-        Self::new(request_id, Status::Ok, flags, payload)
+    pub fn simplified(request_id: u32, payload: Vec<u8>, flags: u8) -> Result<Self> {
+        Self::new(request_id, Status::Simplified, flags, payload)
     }
 
     pub fn error(request_id: u32, message: &str) -> Result<Self> {
@@ -226,11 +226,11 @@ impl BinaryResponse {
                     ))
                 }
             },
-            Status::Ok => {
+            Status::Simplified => {
                 if self.envelope.flags != response_flags::HAS_EXPR {
                     return Err(WireError::invalid(
-                        "ok response",
-                        "OK status must use exactly HAS_EXPR",
+                        "simplified response",
+                        "SIMPLIFIED status must use exactly HAS_EXPR",
                     ));
                 }
                 SimplifyBlock::decode(&self.payload)?;

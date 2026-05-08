@@ -320,7 +320,7 @@ fn text_response(query: &TextQuery, result: QueryResult) -> String {
             out
         }
         QueryStatus::Unknown => format_unknown(result.message.as_deref()),
-        QueryStatus::Ok => "success\n".to_owned(),
+        QueryStatus::Simplified => "success\n".to_owned(),
     }
 }
 

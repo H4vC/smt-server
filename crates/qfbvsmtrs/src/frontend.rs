@@ -210,7 +210,7 @@ pub fn format_smt2_response(query: &Query, result: &SolveResult) -> String {
             out
         }
         SolveStatus::Unknown => format_unknown(result.message.as_deref()),
-        SolveStatus::Ok => "success\n".to_owned(),
+        SolveStatus::Simplified => "success\n".to_owned(),
     }
 }
 

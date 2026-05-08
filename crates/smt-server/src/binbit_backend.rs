@@ -19,7 +19,7 @@ impl Backend for BinbitBackend {
 
     fn handle(&self, request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
         match request.envelope.command {
-            Command::Simplify => Ok(QueryResult::ok_simplify(SimplifyBlock {
+            Command::Simplify => Ok(QueryResult::simplified(SimplifyBlock {
                 expression: request.expression.clone(),
                 target_node: request
                     .target_ref()

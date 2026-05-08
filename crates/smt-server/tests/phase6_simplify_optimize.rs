@@ -18,7 +18,7 @@ fn simplify_returns_simplify_block() {
         .encode()
         .unwrap();
     let response = BinaryResponse::parse(&response).unwrap();
-    assert_eq!(response.envelope.status, Status::Ok);
+    assert_eq!(response.envelope.status, Status::Simplified);
     assert_eq!(response.envelope.flags, response_flags::HAS_EXPR);
     let block = SimplifyBlock::decode(&response.payload).unwrap();
     assert!(block.target_node.is_bv());

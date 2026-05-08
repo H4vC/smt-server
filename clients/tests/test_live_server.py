@@ -12,7 +12,6 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Iterable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT_ROOT = REPO_ROOT / "clients" / "python"
@@ -120,54 +119,48 @@ def test_cpp_client_live_round_trip(port: int) -> None:
     subprocess.check_call([str(exe), "127.0.0.1", str(port)], cwd=REPO_ROOT)
 
 
-def assert_model_has_value(entries: Iterable[smt.ModelEntry], width: int, value: int) -> None:
-    for entry in entries:
-        if entry.value.width == width and entry.value.as_int() == value:
-            return
-    raise AssertionError(f"model does not contain {width}-bit value {value}")
+def test_python_client_binary_round_trip(client: smt.Client) -> None:
+    ctx = smt.Context()
+    x = ctx.bv_var("x", 4)
+    ctx.assert_(ctx.bv_eq(x, 2))
 
-
-def test_python_client_binary_round_trip(client: smt.TcpClient) -> None:
-    builder = smt.Builder()
-    x = builder.bv_var("x", 4)
-    builder.assert_(builder.bv_eq(x, builder.bv_const(2, 4)))
-
-    response = client.send_request(builder.build_solve_request(0x1001, want_model=True))
+    response = client.solve(ctx, request_id=0x1001)
     assert response.request_id == 0x1001
-    assert response.status == smt.SAT
-    assert response.flags == smt.HAS_MODEL
-    assert_model_has_value(response.model(), 4, 2)
+    assert response.status is smt.Status.SAT
+    assert response.model is not None
+    assert response.model[x].width == 4
+    assert response.model[x].as_int() == 2
 
 
-def test_binary_cache_rebinds_response_ids(client: smt.TcpClient) -> None:
-    builder = smt.Builder()
-    x = builder.bv_var("cached", 3)
-    builder.assert_(builder.bv_eq(x, builder.bv_const(5, 3)))
+def test_binary_cache_rebinds_response_ids(client: smt.Client) -> None:
+    ctx = smt.Context()
+    x = ctx.bv_var("cached", 3)
+    ctx.assert_(ctx.bv_eq(x, 5))
 
-    first = client.send_request(builder.build_solve_request(0x2001))
-    second = client.send_request(builder.build_solve_request(0x2002))
+    first = client.solve(ctx, request_id=0x2001)
+    second = client.solve(ctx, request_id=0x2002)
     assert first.request_id == 0x2001
     assert second.request_id == 0x2002
-    assert first.status == smt.SAT
-    assert second.status == smt.SAT
+    assert first.status is smt.Status.SAT
+    assert second.status is smt.Status.SAT
 
 
-def test_python_client_optimization_round_trip(client: smt.TcpClient) -> None:
-    builder = smt.Builder()
-    x = builder.bv_var("opt", 4)
-    builder.assert_(builder.bv_uge(x, builder.bv_const(5, 4)))
+def test_python_client_optimization_round_trip(client: smt.Client) -> None:
+    ctx = smt.Context()
+    x = ctx.bv_var("opt", 4)
+    ctx.assert_(ctx.bv_uge(x, 5))
 
-    response = client.send_request(builder.build_minimize_request(0x3001, x))
-    assert response.request_id == 0x3001
-    assert response.status == smt.SAT
-    assert response.flags == smt.HAS_VALUE
-    optimum = response.optimization().optimum
-    assert optimum.width == 4
-    assert optimum.as_int() == 5
+    result = client.minimize(x, request_id=0x3001)
+    assert result.request_id == 0x3001
+    assert result.status is smt.Status.SAT
+    assert result.optimum is not None
+    assert result.optimum.width == 4
+    assert result.optimum.as_int() == 5
+    assert result.model is not None
 
 
-def test_text_smtlib_round_trip(client: smt.TcpClient) -> None:
-    script = b"""
+def test_text_smtlib_round_trip(client: smt.Client) -> None:
+    script = """
         #| yaspar parses this block comment in the live text path |#
         (set-logic QF_BV)
         (declare-const |x y| (_ BitVec 2))
@@ -175,14 +168,14 @@ def test_text_smtlib_round_trip(client: smt.TcpClient) -> None:
         (check-sat)
         (get-value (|x y|))
     """
-    text = client.send_text(script)
+    text = client.smt2(script)
     assert text.startswith("sat\n"), text
     assert "(|x y| #b11)" in text, text
 
 
 def main() -> None:
     with LiveServer() as server:
-        with smt.TcpClient("127.0.0.1", server.port, timeout=5) as client:
+        with smt.Client("127.0.0.1", server.port, timeout=5) as client:
             test_python_client_binary_round_trip(client)
             test_binary_cache_rebinds_response_ids(client)
             test_python_client_optimization_round_trip(client)

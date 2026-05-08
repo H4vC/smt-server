@@ -163,7 +163,7 @@ fn is_cacheable_binary_response(response: &[u8]) -> bool {
         .map(|response| {
             matches!(
                 response.envelope.status,
-                Status::Sat | Status::Unsat | Status::Ok
+                Status::Sat | Status::Unsat | Status::Simplified
             )
         })
         .unwrap_or(false)
