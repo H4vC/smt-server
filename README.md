@@ -157,7 +157,7 @@ smt_wire::Client client("127.0.0.1", 9123);
 auto response = client.solve(ctx);
 ```
 
-A matching C++ walkthrough is in `cpp/example.cpp`. On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `Client`.
+A matching C++ walkthrough is in `cpp/tests/example.cpp`. On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `Client`.
 
 ## Standalone qfbvsmtrs CLI
 
@@ -186,7 +186,7 @@ cmake --build target/cpp-cmake
 ctest --test-dir target/cpp-cmake --output-on-failure
 ```
 
-`python/tests/test_live_server.py` also exercises the live C++ TCP client when a compiler is available.
+`python/tests/test_live_server.py` exercises the Python client against a live server. The C++ project is tested separately through CMake.
 
 The default Rumba integration test uses embedded samples. The full CSV dataset test needs Rumba's dataset directory; clone `https://github.com/thalium/rumba` next to this repository or set `SMT_SERVER_RUMBA_DATASET_DIR`. Run the full CSV suite through the binary simplify path with:
 
@@ -207,8 +207,8 @@ cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 Standalone C++ smoke test:
 
 ```sh
-c++ -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/cpp_client_smoke.cpp -o cpp_client_smoke
-./cpp_client_smoke
+c++ -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/smoke.cpp -o cpp_smoke
+./cpp_smoke
 ```
 
 ## Repository layout

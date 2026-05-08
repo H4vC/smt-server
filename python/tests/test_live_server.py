@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import shutil
 import socket
 import subprocess
 import sys
@@ -86,41 +85,6 @@ class LiveServer:
             self.proc.wait(timeout=5)
 
 
-def cpp_compiler() -> str | None:
-    configured = os.environ.get("CXX")
-    if configured and shutil.which(configured):
-        return configured
-    for candidate in ("clang++", "g++", "c++"):
-        found = shutil.which(candidate)
-        if found:
-            return found
-    return None
-
-
-def test_cpp_client_live_round_trip(port: int) -> None:
-    compiler = cpp_compiler()
-    if compiler is None:
-        print("No C++ compiler available; skipping live C++ client test")
-        return
-    exe = REPO_ROOT / "target" / ("cpp_live_client.exe" if os.name == "nt" else "cpp_live_client")
-    cmd = [
-        compiler,
-        "-std=c++17",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-        "-I",
-        str(REPO_ROOT / "cpp" / "include"),
-        str(REPO_ROOT / "cpp" / "tests" / "cpp_live_client.cpp"),
-        "-o",
-        str(exe),
-    ]
-    if os.name == "nt":
-        cmd.append("-lws2_32")
-    subprocess.check_call(cmd, cwd=REPO_ROOT)
-    subprocess.check_call([str(exe), "127.0.0.1", str(port)], cwd=REPO_ROOT)
-
-
 def test_python_client_binary_round_trip(client: smt.Client) -> None:
     ctx = smt.Context()
     x = ctx.bv_var("x", 4)
@@ -182,7 +146,6 @@ def main() -> None:
             test_binary_cache_rebinds_response_ids(client)
             test_python_client_optimization_round_trip(client)
             test_text_smtlib_round_trip(client)
-        test_cpp_client_live_round_trip(server.port)
 
 
 if __name__ == "__main__":

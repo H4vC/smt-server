@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cctype>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -75,7 +76,60 @@ struct Assertion { uint32_t root; bool named; uint32_t name_offset, name_len; };
 struct Meta { bool is_bool; uint32_t width; };
 } // namespace detail
 
-struct ScalarValue { uint32_t width; std::vector<uint8_t> bytes; };
+struct ScalarValue {
+    uint32_t width = 0;
+    std::vector<uint8_t> bytes;
+
+    bool is_bool() const { return width == 0; }
+    bool is_bv() const { return width != 0; }
+
+    void validate() const {
+        if (width == 0) {
+            if (bytes.size() != 1 || (bytes[0] != 0 && bytes[0] != 1)) throw std::invalid_argument("bad Bool scalar");
+            return;
+        }
+        if (bytes.size() != detail::bytes_for_width(width)) throw std::invalid_argument("bad BV scalar length");
+        uint32_t valid = width % 8;
+        if (valid != 0 && !bytes.empty()) {
+            uint8_t mask = uint8_t((1u << valid) - 1u);
+            if ((bytes.back() & uint8_t(~mask)) != 0) throw std::invalid_argument("bad BV scalar high bits");
+        }
+    }
+
+    uint64_t to_u64() const {
+        validate();
+        if (width == 0) return bytes[0] != 0 ? 1u : 0u;
+        uint64_t out = 0;
+        const size_t limit = bytes.size() < 8 ? bytes.size() : 8;
+        for (size_t i = 0; i < limit; ++i) out |= uint64_t(bytes[i]) << (8 * i);
+        if (width < 64) out &= (uint64_t(1) << width) - 1u;
+        if (width > 64) {
+            for (size_t i = 8; i < bytes.size(); ++i) {
+                if (bytes[i] != 0) throw std::overflow_error("BV scalar does not fit in uint64_t");
+            }
+        }
+        return out;
+    }
+
+    int64_t to_i64() const {
+        validate();
+        if (width == 0) return bytes[0] != 0 ? 1 : 0;
+        uint64_t out = 0;
+        const size_t limit = bytes.size() < 8 ? bytes.size() : 8;
+        for (size_t i = 0; i < limit; ++i) out |= uint64_t(bytes[i]) << (8 * i);
+        if (width < 64) {
+            if ((out & (uint64_t(1) << (width - 1))) != 0) out |= ~((uint64_t(1) << width) - 1u);
+        } else if (width > 64) {
+            bool negative = (out & (uint64_t(1) << 63)) != 0;
+            for (uint32_t bit = 64; bit < width; ++bit) {
+                bool bit_set = ((bytes[bit / 8] >> (bit % 8)) & 1u) != 0;
+                if (bit_set != negative) throw std::overflow_error("BV scalar does not fit in int64_t");
+            }
+        }
+        if (out <= uint64_t(std::numeric_limits<int64_t>::max())) return static_cast<int64_t>(out);
+        return -1 - static_cast<int64_t>(~out);
+    }
+};
 
 namespace detail {
 struct ModelEntry { uint32_t node_ref; ScalarValue value; };

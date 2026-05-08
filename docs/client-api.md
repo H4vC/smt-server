@@ -14,7 +14,7 @@ The user-facing clients expose the same model: a `Context` owns an append-only t
 The full side-by-side walkthroughs are:
 
 - Python: `python/example.py`
-- C++: `cpp/example.cpp`
+- C++: `cpp/tests/example.cpp`
 - Rust: `crates/smt-wire/examples/example.rs`
 
 ## Python

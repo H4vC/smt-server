@@ -18,15 +18,6 @@ std::string status_name(smt_wire::Status status) {
     return "Status::<invalid>";
 }
 
-uint64_t scalar_u64(const smt_wire::ScalarValue& value) {
-    uint64_t out = 0;
-    const auto limit = value.bytes.size() < 8 ? value.bytes.size() : 8;
-    for (size_t i = 0; i < limit; ++i) {
-        out |= uint64_t(value.bytes[i]) << (8 * i);
-    }
-    return out;
-}
-
 std::string to_rpn(const smt_wire::Term& term) {
     switch (term.op()) {
         case smt_wire::Op::BV_VAR:
@@ -85,7 +76,7 @@ int main() {
             return a.first.name() < b.first.name();
         });
         for (const auto& item : items) {
-            std::cout << item.first.name() << " = 0x" << std::hex << scalar_u64(item.second) << std::dec << "\n";
+            std::cout << item.first.name() << " = 0x" << std::hex << item.second.to_u64() << std::dec << "\n";
         }
     }
 

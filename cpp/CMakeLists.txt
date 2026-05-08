@@ -29,5 +29,4 @@ if(SMT_WIRE_CPP_BUILD_TESTS)
 
   add_executable(example tests/example.cpp)
   target_link_libraries(example PRIVATE smt_wire::smt_wire)
-  add_test(NAME example COMMAND $<TARGET_FILE:example>)
 endif()

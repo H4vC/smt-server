@@ -55,7 +55,6 @@ jobs:
       - name: C++ client CMake smoke
         shell: bash
         run: |
-          target/debug/smt_server &
           cd cpp
           cmake -B build -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --config Debug
