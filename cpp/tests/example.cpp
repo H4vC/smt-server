@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>

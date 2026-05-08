@@ -1,8 +1,5 @@
 #pragma once
-// Single-file C++17 builder for the SMT v1 wire format.
-// No networking and no dependencies beyond the C++ standard library.
 
-#include <climits>
 #include <cstdint>
 #include <cctype>
 #include <atomic>
