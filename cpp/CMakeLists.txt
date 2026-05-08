@@ -41,4 +41,11 @@ if(SMT_WIRE_CPP_BUILD_TESTS)
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
   )
+
+  add_executable(smt_wire_cpp_example example.cpp)
+  target_link_libraries(smt_wire_cpp_example PRIVATE smt_wire::smt_wire)
+  target_compile_options(smt_wire_cpp_example PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
+  )
 endif()

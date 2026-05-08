@@ -15,9 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Software Development :: Libraries",
 ]
-
 dependencies = []
 
 [tool.setuptools]
 py-modules = ["smt_wire"]
-package-dir = {"" = "python"}

@@ -7,7 +7,7 @@ It targets binary analysis, lifting, symbolic execution, and IR experiments wher
 ## Clients
 
 - C++: header-only C++17 package under `cpp/`.
-- Python: dependency-free package under `python/`, installable with `pip install git+...`.
+- Python: dependency-free package under `python/`, installable with pip's `#subdirectory=python` support.
 - Rust: `smt-wire` crate with an idiomatic `Context`/term/`Client` API; protocol internals are isolated for the server.
 
 ## Backends
@@ -59,7 +59,7 @@ Payload formats:
 
 ## Python client example
 
-The Python client can be installed with `pip install git+<repo-url>` or used directly by adding `python/` to `PYTHONPATH`.
+The Python client can be installed with `pip install 'git+https://github.com/LLVMParty/smt-server.git#subdirectory=python'` or used directly by adding `python/` to `PYTHONPATH`.
 
 ```python
 import smt_wire as smt
@@ -119,6 +119,8 @@ with smt.Client("127.0.0.1", 9123) as client:
     print(client.smt2(script))
 ```
 
+The full Python walkthrough is in `python/example.py`.
+
 ## Rust client
 
 ```rust
@@ -138,6 +140,8 @@ if response.status == Status::Sat {
 }
 ```
 
+A matching Rust walkthrough is in `crates/smt-wire/examples/example.rs`.
+
 ## C++ client
 
 The C++ helper is a dependency-free C++17 header:
@@ -153,7 +157,7 @@ smt_wire::Client client("127.0.0.1", 9123);
 auto response = client.solve(ctx);
 ```
 
-On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `Client`.
+A matching C++ walkthrough is in `cpp/example.cpp`. On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `Client`.
 
 ## Standalone qfbvsmtrs CLI
 

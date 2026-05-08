@@ -480,11 +480,8 @@ impl Context {
     }
 
     pub fn bv_extract(&self, x: &BvTerm, hi: u32, lo: u32) -> Result<BvTerm> {
-        let reference =
-            self.inner
-                .borrow_mut()
-                .builder
-                .bv_extract(self.expect_bv(x, "extract")?.0, hi, lo)?;
+        let x_ref = self.expect_bv(x, "extract")?.0;
+        let reference = self.inner.borrow_mut().builder.bv_extract(x_ref, hi, lo)?;
         self.bv_term(reference)
     }
 
@@ -608,20 +605,22 @@ impl Context {
     }
 
     pub fn bv_rotate_left(&self, x: &BvTerm, amount: u64) -> Result<BvTerm> {
+        let x_ref = self.expect_bv(x, "rotate_left")?.0;
         let reference = self
             .inner
             .borrow_mut()
             .builder
-            .bv_rotate_left(self.expect_bv(x, "rotate_left")?.0, amount)?;
+            .bv_rotate_left(x_ref, amount)?;
         self.bv_term(reference)
     }
 
     pub fn bv_rotate_right(&self, x: &BvTerm, amount: u64) -> Result<BvTerm> {
+        let x_ref = self.expect_bv(x, "rotate_right")?.0;
         let reference = self
             .inner
             .borrow_mut()
             .builder
-            .bv_rotate_right(self.expect_bv(x, "rotate_right")?.0, amount)?;
+            .bv_rotate_right(x_ref, amount)?;
         self.bv_term(reference)
     }
 

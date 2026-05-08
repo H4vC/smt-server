@@ -45,19 +45,16 @@ jobs:
       - name: qfbvsmtrs fuzz crate check
         run: cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
       - name: Python client smoke
-        run: python clients/tests/test_python_client.py
+        run: python python/tests/test_python_client.py
+      - name: Python package install smoke
+        run: |
+          python -m pip install ./python --target python-pkg-smoke
+          python -c "import sys; sys.path.insert(0, 'python-pkg-smoke'); import smt_wire; ctx = smt_wire.Context(); assert ctx.bv_var('x', 8).width == 8"
       - name: Live server end-to-end
-        run: python clients/tests/test_live_server.py
-      - name: C++ client smoke
+        run: python python/tests/test_live_server.py
+      - name: C++ client CMake smoke
         shell: bash
         run: |
-          if command -v clang++ >/dev/null 2>&1; then
-            CXX=clang++
-          elif command -v g++ >/dev/null 2>&1; then
-            CXX=g++
-          else
-            echo "No C++ compiler available; skipping smoke test"
-            exit 0
-          fi
-          "$CXX" -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_client_smoke
-          ./cpp_client_smoke
+          cmake -S . -B target/cpp-cmake -DSMT_WIRE_CPP_BUILD_TESTS=ON
+          cmake --build target/cpp-cmake --config Debug
+          ctest --test-dir target/cpp-cmake --output-on-failure -C Debug
