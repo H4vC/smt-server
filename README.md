@@ -178,38 +178,12 @@ cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 python3 python/tests/test_python_client.py
-python3 python/tests/test_live_server.py
 cmake -S cpp -B target/cpp-cmake
 cmake --build target/cpp-cmake
-ctest --test-dir target/cpp-cmake --output-on-failure
 ```
 
-`python/tests/test_live_server.py` exercises the Python client against a live server. The C++ project is tested separately through CMake.
-
-The default Rumba integration test uses embedded samples. The full CSV dataset test needs Rumba's dataset directory; clone `https://github.com/thalium/rumba` next to this repository or set `SMT_SERVER_RUMBA_DATASET_DIR`. Run the full CSV suite through the binary simplify path with:
-
-```sh
-SMT_SERVER_RUMBA_FULL_DATASET=1 cargo test -p smt-server --test rumba_simplify -- --nocapture
-```
-
-Optional `qfbvsmtrs` validation gates:
-
-```sh
-cargo test -p qfbvsmtrs --test differential_z3
-QFBVSMTRS_RANDOM_CIRCUIT_SAMPLES=10000 cargo test -p qfbvsmtrs --test random_circuits
-QFBVSMTRS_DIFF_RANDOM=1 cargo test -p qfbvsmtrs --test differential_z3
-QFBVSMTRS_SMTLIB_DIR=/path/to/SMT-LIB/QF_BV cargo test -p qfbvsmtrs --test differential_z3
-cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
-```
-
-Standalone C++ smoke test:
-
-```sh
-c++ -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/smoke.cpp -o cpp_smoke
-./cpp_smoke
-```
+See `docs/qfbvsmtrs-validation.md` for maintainer validation gates and corpus-running notes.
 
 ## Repository layout
 

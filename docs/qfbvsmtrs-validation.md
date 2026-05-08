@@ -29,6 +29,11 @@ python3 python/tests/test_python_client.py
 python3 python/tests/test_live_server.py
 cmake -S cpp -B /tmp/smt_cpp_cmake
 cmake --build /tmp/smt_cpp_cmake
+cargo build -p smt-server
+target/debug/smt-server 127.0.0.1:9123 &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+sleep 1
 ctest --test-dir /tmp/smt_cpp_cmake --output-on-failure
 ```
 
