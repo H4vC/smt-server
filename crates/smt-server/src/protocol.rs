@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use smt_wire::{
+use smt_wire::raw::{
     expr::validate_node_ref, request::is_binary_request_payload, response_flags, BinaryRequest,
     BinaryResponse, Command, ModelBlock, OptimizationValueBlock, SimplifyBlock, Sort, Status,
     UnsatCoreBlock, WireError,
@@ -49,8 +49,8 @@ fn solve_response(
     result: QueryResult,
 ) -> smt_wire::Result<BinaryResponse> {
     let request_id = request.envelope.request_id;
-    let want_model = (request.envelope.flags & smt_wire::request_flags::WANT_MODEL) != 0;
-    let want_core = (request.envelope.flags & smt_wire::request_flags::WANT_CORE) != 0;
+    let want_model = (request.envelope.flags & smt_wire::raw::request_flags::WANT_MODEL) != 0;
+    let want_core = (request.envelope.flags & smt_wire::raw::request_flags::WANT_CORE) != 0;
     match result.status {
         QueryStatus::Sat => {
             if want_model {
@@ -245,7 +245,8 @@ fn optimize_response(
             let mut optimization = result.optimization.ok_or_else(|| {
                 WireError::invalid("optimization response", "SAT result without optimum block")
             })?;
-            let want_model = (request.envelope.flags & smt_wire::request_flags::WANT_MODEL) != 0;
+            let want_model =
+                (request.envelope.flags & smt_wire::raw::request_flags::WANT_MODEL) != 0;
             if want_model && optimization.model.is_none() {
                 return BinaryResponse::error(
                     request_id,

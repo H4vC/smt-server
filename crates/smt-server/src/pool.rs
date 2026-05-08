@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use smt_wire::BinaryRequest;
+use smt_wire::raw::BinaryRequest;
 
 use crate::backend::{Backend, QueryResult};
 

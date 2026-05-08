@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use smt_qfbv_smtlib::{lower_script, FrontendError, FrontendOptions, QfBvSink};
-use smt_wire::{
+use smt_wire::raw::{
     BinaryRequest, ExprBuilder, ModelBlock, NodeRef, ScalarValue, UnsatCoreBlock, WireError,
 };
 
@@ -340,7 +340,7 @@ fn format_model(request: &BinaryRequest, model: &ModelBlock) -> smt_wire::Result
     for entry in &model.entries {
         let node = expr.node(entry.node_ref.index())?;
         let name = expr.blob_str(
-            smt_wire::BlobRef::from_payload(node.payload),
+            smt_wire::raw::BlobRef::from_payload(node.payload),
             "model variable",
         )?;
         out.push_str("  (define-fun ");
@@ -376,7 +376,7 @@ fn format_get_values(
     for entry in &model.entries {
         let node = expr.node(entry.node_ref.index())?;
         let name = expr.blob_str(
-            smt_wire::BlobRef::from_payload(node.payload),
+            smt_wire::raw::BlobRef::from_payload(node.payload),
             "model variable",
         )?;
         values.insert(name.to_owned(), scalar_to_smt_value(&entry.value));

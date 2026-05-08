@@ -7,9 +7,9 @@ use crate::request::BinaryRequest;
 use crate::types::{BlobRef, NodeRef, Sort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NodeMeta {
-    sort: Sort,
-    width: u32,
+pub(crate) struct NodeMeta {
+    pub(crate) sort: Sort,
+    pub(crate) width: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub struct Assertion {
 pub struct CompactedExpression {
     bytes: Vec<u8>,
     old_to_new: Vec<Option<NodeRef>>,
+    new_to_old: HashMap<NodeRef, NodeRef>,
 }
 
 impl CompactedExpression {
@@ -58,21 +59,37 @@ impl CompactedExpression {
         }
         Ok(mapped)
     }
+
+    pub fn original_ref(&self, new: NodeRef) -> Result<NodeRef> {
+        self.new_to_old.get(&new).copied().ok_or_else(|| {
+            WireError::invalid(
+                "compacted node reference",
+                format!(
+                    "new reference {:#010x} is not present in compaction map",
+                    new.raw()
+                ),
+            )
+        })
+    }
+
+    pub fn new_to_old(&self) -> &HashMap<NodeRef, NodeRef> {
+        &self.new_to_old
+    }
 }
 
 /// Append-only expression and query builder with eager sort/width validation.
 #[derive(Debug, Clone, Default)]
 pub struct ExprBuilder {
-    nodes: Vec<RawNode>,
-    children: Vec<NodeRef>,
-    blob: Vec<u8>,
-    meta: Vec<NodeMeta>,
-    assertions: Vec<Assertion>,
-    assumptions: Vec<NodeRef>,
-    scopes: Vec<usize>,
-    bv_vars: HashMap<(String, u32), NodeRef>,
-    bool_vars: HashMap<String, NodeRef>,
-    symbols: HashMap<String, NodeMeta>,
+    pub(crate) nodes: Vec<RawNode>,
+    pub(crate) children: Vec<NodeRef>,
+    pub(crate) blob: Vec<u8>,
+    pub(crate) meta: Vec<NodeMeta>,
+    pub(crate) assertions: Vec<Assertion>,
+    pub(crate) assumptions: Vec<NodeRef>,
+    pub(crate) scopes: Vec<usize>,
+    pub(crate) bv_vars: HashMap<(String, u32), NodeRef>,
+    pub(crate) bool_vars: HashMap<String, NodeRef>,
+    pub(crate) symbols: HashMap<String, NodeMeta>,
 }
 
 impl ExprBuilder {
@@ -131,11 +148,15 @@ impl ExprBuilder {
         }
 
         let mut old_to_new = vec![None; self.nodes.len()];
+        let mut new_to_old = HashMap::new();
         let mut next_index = 0u32;
         for (old_index, is_live) in marked.iter().copied().enumerate() {
             if is_live {
                 let meta = self.meta[old_index];
-                old_to_new[old_index] = Some(NodeRef::new(meta.sort, next_index)?);
+                let new_ref = NodeRef::new(meta.sort, next_index)?;
+                let old_ref = NodeRef::new(meta.sort, old_index as u32)?;
+                old_to_new[old_index] = Some(new_ref);
+                new_to_old.insert(new_ref, old_ref);
                 next_index = next_index
                     .checked_add(1)
                     .ok_or(WireError::IntegerOverflow("compacted node index"))?;
@@ -180,6 +201,7 @@ impl ExprBuilder {
         Ok(CompactedExpression {
             bytes: expression.into_bytes(),
             old_to_new,
+            new_to_old,
         })
     }
 

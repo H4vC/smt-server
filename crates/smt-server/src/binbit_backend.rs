@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use binbit::{BoolTerm, BvTerm, SmtResult, SmtSolver};
-use smt_wire::{
+use smt_wire::raw::{
     request_flags, tag, BinaryRequest, BlobRef, Command, ModelBlock, ModelEntry, NodeRef,
     OptimizationValueBlock, ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
@@ -511,27 +511,27 @@ fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
 }
 
 fn child_bv(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &BinbitTranslation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
     offset: u32,
 ) -> smt_wire::Result<BvTerm> {
     translation.bv(expr.child_ref(node.children + offset)?)
 }
 
 fn child_bool(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &BinbitTranslation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
     offset: u32,
 ) -> smt_wire::Result<BoolTerm> {
     translation.bool(expr.child_ref(node.children + offset)?)
 }
 
 fn child_bv2(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &BinbitTranslation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
 ) -> smt_wire::Result<(BvTerm, BvTerm)> {
     Ok((
         child_bv(expr, translation, node, 0)?,
@@ -540,9 +540,9 @@ fn child_bv2(
 }
 
 fn child_bool2(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &BinbitTranslation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
 ) -> smt_wire::Result<(BoolTerm, BoolTerm)> {
     Ok((
         child_bool(expr, translation, node, 0)?,
@@ -552,7 +552,7 @@ fn child_bool2(
 
 fn binbit_bv_const(
     solver: &mut SmtSolver,
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     width: u32,
     payload: u64,
 ) -> smt_wire::Result<BvTerm> {

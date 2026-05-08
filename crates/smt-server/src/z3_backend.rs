@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use smt_wire::{
+use smt_wire::raw::{
     request_flags, tag, BinaryRequest, BlobRef, Command, ModelBlock, ModelEntry, NodeRef,
     OptimizationValueBlock, ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
@@ -559,27 +559,27 @@ fn optimize(request: &BinaryRequest) -> smt_wire::Result<QueryResult> {
 }
 
 fn child_bv(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &Z3Translation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
     offset: u32,
 ) -> smt_wire::Result<BV> {
     translation.bv(expr.child_ref(node.children + offset)?)
 }
 
 fn child_bool(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &Z3Translation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
     offset: u32,
 ) -> smt_wire::Result<Bool> {
     translation.bool(expr.child_ref(node.children + offset)?)
 }
 
 fn child_bv2(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &Z3Translation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
 ) -> smt_wire::Result<(BV, BV)> {
     Ok((
         child_bv(expr, translation, node, 0)?,
@@ -588,9 +588,9 @@ fn child_bv2(
 }
 
 fn child_bool2(
-    expr: &smt_wire::ExprView<'_>,
+    expr: &smt_wire::raw::ExprView<'_>,
     translation: &Z3Translation,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
 ) -> smt_wire::Result<(Bool, Bool)> {
     Ok((
         child_bool(expr, translation, node, 0)?,
@@ -598,7 +598,11 @@ fn child_bool2(
     ))
 }
 
-fn z3_bv_const(expr: &smt_wire::ExprView<'_>, width: u32, payload: u64) -> smt_wire::Result<BV> {
+fn z3_bv_const(
+    expr: &smt_wire::raw::ExprView<'_>,
+    width: u32,
+    payload: u64,
+) -> smt_wire::Result<BV> {
     if width <= 64 {
         return Ok(BV::from_u64(payload, width));
     }

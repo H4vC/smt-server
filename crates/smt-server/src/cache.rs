@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use smt_wire::{constants::RESPONSE_MAGIC, request::is_binary_request_payload};
+use smt_wire::raw::{constants::RESPONSE_MAGIC, request::is_binary_request_payload};
 
 pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 4096;
 pub const DEFAULT_MAX_CACHE_KEY_BYTES: usize = 1024 * 1024;

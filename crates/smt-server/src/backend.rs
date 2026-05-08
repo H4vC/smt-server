@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 
-use smt_wire::{
+use smt_wire::raw::{
     expr::validate_node_ref, request_flags, BinaryRequest, Command, ModelBlock,
     OptimizationValueBlock, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
@@ -324,11 +324,11 @@ pub trait Backend: Send + Sync {
         false
     }
 
-    fn handle(&self, request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult>;
+    fn handle(&self, request: &smt_wire::raw::BinaryRequest) -> smt_wire::Result<QueryResult>;
 
     fn handle_with_context(
         &self,
-        request: &smt_wire::BinaryRequest,
+        request: &smt_wire::raw::BinaryRequest,
         context: &SolveContext,
     ) -> smt_wire::Result<QueryResult> {
         if context.is_cancelled() {

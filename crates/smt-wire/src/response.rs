@@ -269,6 +269,30 @@ impl ScalarValue {
         Ok(Self { width, bytes })
     }
 
+    pub fn as_bool(&self) -> Result<bool> {
+        self.validate()?;
+        if self.width != 0 {
+            return Err(WireError::invalid("scalar value", "expected Bool scalar"));
+        }
+        Ok(self.bytes[0] != 0)
+    }
+
+    pub fn as_u128(&self) -> Result<u128> {
+        self.validate()?;
+        if self.width == 0 {
+            return Ok(u128::from(self.bytes[0] != 0));
+        }
+        if self.bytes.len() > 16 {
+            return Err(WireError::invalid(
+                "scalar value",
+                "BV scalar does not fit in u128",
+            ));
+        }
+        let mut bytes = [0u8; 16];
+        bytes[..self.bytes.len()].copy_from_slice(&self.bytes);
+        Ok(u128::from_le_bytes(bytes))
+    }
+
     pub fn encode(&self, dst: &mut Vec<u8>) -> Result<()> {
         self.validate()?;
         le::write_u32(dst, self.width);

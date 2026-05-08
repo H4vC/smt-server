@@ -8,7 +8,7 @@ use smt_server::{
     handle_binary_frame, serve_tcp, Backend, BinbitBackend, QfbvsmtrsBackend, QueryResult,
     ServerConfig, Z3Backend,
 };
-use smt_wire::{
+use smt_wire::raw::{
     le, response_flags, status, tag, BinaryRequest, BinaryResponse, BlobRef, Command, ExprBuilder,
     ExpressionBuffer, ModelBlock, NodeRef, RawNode, Status, UnsatCoreBlock,
 };
@@ -64,7 +64,7 @@ fn request_with_duplicate_bv_symbol_model(request_id: u32) -> Vec<u8> {
     BinaryRequest::new(
         request_id,
         Command::Solve,
-        smt_wire::request_flags::WANT_MODEL,
+        smt_wire::raw::request_flags::WANT_MODEL,
         0,
         expression,
         vec![NodeRef::bool(3).unwrap()],
@@ -327,7 +327,7 @@ impl Backend for MissingModelBackend {
         "missing-model-test"
     }
 
-    fn handle(&self, _request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult> {
+    fn handle(&self, _request: &smt_wire::raw::BinaryRequest) -> smt_wire::Result<QueryResult> {
         Ok(QueryResult::sat(None))
     }
 }
@@ -339,7 +339,7 @@ impl Backend for UnknownMessageBackend {
         "unknown-message-test"
     }
 
-    fn handle(&self, _request: &smt_wire::BinaryRequest) -> smt_wire::Result<QueryResult> {
+    fn handle(&self, _request: &smt_wire::raw::BinaryRequest) -> smt_wire::Result<QueryResult> {
         Ok(QueryResult::unknown("deadline elapsed"))
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rumba_core::{expr::Expr as RumbaExpr, parser::parse_expr, varint::make_mask};
 use smt_server::{handle_binary_frame, RumbaBackend};
-use smt_wire::{
+use smt_wire::raw::{
     tag, BinaryResponse, BlobRef, ExprBuilder, ExprView, NodeRef, SimplifyBlock, Status,
 };
 
@@ -198,7 +198,7 @@ impl CompiledWireExpr {
 
 fn child_index(
     view: &ExprView<'_>,
-    node: &smt_wire::RawNode,
+    node: &smt_wire::raw::RawNode,
     offset: usize,
 ) -> smt_wire::Result<usize> {
     Ok(view.child_ref(node.children + offset as u32)?.index() as usize)

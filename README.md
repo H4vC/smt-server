@@ -8,7 +8,7 @@ It targets binary analysis, lifting, symbolic execution, and IR experiments wher
 
 - C++: single C++17 header at `clients/cpp/smt_wire.hpp`.
 - Python: dependency-free module at `clients/python/smt_wire.py`.
-- Rust: `smt-wire` crate with builders, codecs, validators, and a blocking TCP client.
+- Rust: `smt-wire` crate with an idiomatic `Context`/term/`Client` API; protocol internals are isolated for the server.
 
 ## Backends
 
@@ -122,18 +122,20 @@ with smt.Client("127.0.0.1", 9123) as client:
 ## Rust client
 
 ```rust
-use smt_wire::{ExprBuilder, TcpClient};
+use smt_wire::{Client, Context, Status};
 
-let mut b = ExprBuilder::new();
-let x = b.bv_var("x", 8).unwrap();
-let c = b.bv_const(42, 8).unwrap();
-let eq = b.bv_eq(x, c).unwrap();
-b.assert(eq).unwrap();
-let request = b.build_solve_request(1, 0, true, false).unwrap();
+let ctx = Context::new();
+let x = ctx.bv_var("x", 8).unwrap();
+ctx.assert_(&ctx.bv_eq(&x, 42u64).unwrap()).unwrap();
 
-let mut client = TcpClient::connect("127.0.0.1:9123").unwrap();
-let response = client.send_binary_request(&request).unwrap();
-println!("{:?}", response.envelope.status);
+let mut client = Client::connect("127.0.0.1:9123").unwrap();
+let response = client.solve(&ctx).unwrap();
+println!("{:?}", response.status);
+if response.status == Status::Sat {
+    if let Some(model) = response.model {
+        println!("x = {:?}", model.get_bv(&x));
+    }
+}
 ```
 
 ## C++ client
@@ -143,16 +145,15 @@ The C++ helper is a dependency-free C++17 header:
 ```cpp
 #include "smt_wire.hpp"
 
-smt_wire::Builder b;
-auto x = b.bv_var("x", 8);
-b.assert_(b.bv_eq(x, b.bv_const(42, 8)));
-auto request = b.build_solve_request(1, 0, true, false);
+smt_wire::Context ctx;
+auto x = ctx.bv_var("x", 8);
+ctx.assert_(ctx.bv_eq(x, 42u));
 
-smt_wire::TcpClient client("127.0.0.1", 9123);
-auto response = client.send_request(request);
+smt_wire::Client client("127.0.0.1", 9123);
+auto response = client.solve(ctx);
 ```
 
-On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `TcpClient`.
+On Windows/MSVC the header requests `Ws2_32.lib` automatically. With MinGW, link with `-lws2_32` when using `Client`.
 
 ## Standalone qfbvsmtrs CLI
 
@@ -205,7 +206,7 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 
 ## Repository layout
 
-- `crates/smt-wire` — Rust wire-format types, builders, codecs, and validators.
+- `crates/smt-wire` — Rust high-level client API plus server-side wire-format internals and validators.
 - `crates/qfbvsmtrs` — standalone pure-Rust `QF_BV` bit-blasting solver crate and CLI.
 - `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend.
 - `clients/python` — Python single-file client helper.

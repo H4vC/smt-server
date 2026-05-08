@@ -7,7 +7,7 @@ use smt_server::{
     serve_tcp, BinbitBackend, CommandRouterBackend, RacingBackend, RumbaBackend, ServerConfig,
     Z3Backend,
 };
-use smt_wire::{response_flags, ExprBuilder, ModelBlock, SimplifyBlock, Status, TcpClient};
+use smt_wire::raw::{response_flags, ExprBuilder, ModelBlock, SimplifyBlock, Status, TcpClient};
 
 fn start_default_test_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

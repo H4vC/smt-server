@@ -7,7 +7,7 @@ use rumba_core::{
     simplify::simplify_mba,
     varint::make_mask,
 };
-use smt_wire::{
+use smt_wire::raw::{
     tag, BinaryRequest, BlobRef, Command, ExprBuilder, ExprView, NodeRef, RawNode, SimplifyBlock,
     WireError,
 };

@@ -8,7 +8,7 @@ use smt_server::{
     handle_text_frame, parse_smtlib_script, request_to_smt2, Backend, BinbitBackend,
     CancellationToken, QfbvsmtrsBackend, QueryResult, RacingBackend, SolveContext, Z3Backend,
 };
-use smt_wire::{BinaryRequest, ExprBuilder};
+use smt_wire::raw::{BinaryRequest, ExprBuilder};
 
 #[test]
 fn smtlib_text_frontend_solves_sat_and_formats_model() {

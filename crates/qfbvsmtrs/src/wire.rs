@@ -8,9 +8,9 @@ use crate::ir::TermId;
 use crate::model::{Model, ScalarValue as QScalarValue};
 use crate::query::{Command as QCommand, Query};
 
-use smt_wire::{
+use smt_wire::raw::{
     request_flags, tag, BinaryRequest, BlobRef, Command, ExprView, ModelBlock, ModelEntry, NodeRef,
-    ScalarValue,
+    RawNode, ScalarValue,
 };
 
 pub fn query_from_wire(request: &BinaryRequest) -> Result<Query> {
@@ -307,7 +307,7 @@ pub fn model_to_wire(model: &Model) -> Result<ModelBlock> {
 fn child(
     expr: &ExprView<'_>,
     terms: &[Option<TermId>],
-    node: &smt_wire::RawNode,
+    node: &RawNode,
     offset: u32,
 ) -> Result<TermId> {
     let reference = expr
@@ -319,7 +319,7 @@ fn child(
 fn child2(
     expr: &ExprView<'_>,
     terms: &[Option<TermId>],
-    node: &smt_wire::RawNode,
+    node: &RawNode,
 ) -> Result<(TermId, TermId)> {
     Ok((child(expr, terms, node, 0)?, child(expr, terms, node, 1)?))
 }

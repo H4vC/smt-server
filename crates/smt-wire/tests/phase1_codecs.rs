@@ -1,9 +1,9 @@
-use smt_wire::{
+use smt_wire::raw::{
     request_flags, response_flags, status, tag, BinaryRequest, BinaryResponse, BlobRef,
     ClientError, Command, ExprBuilder, ExprView, ExpressionBuffer, ModelBlock, ModelEntry, NodeRef,
-    OptimizationValueBlock, RawNode, ScalarValue, SimplifyBlock, Sort, Status, TcpClient,
-    UnsatCoreBlock,
+    OptimizationValueBlock, RawNode, SimplifyBlock, TcpClient, UnsatCoreBlock,
 };
+use smt_wire::{Context, ScalarValue, Sort, Status, WalkOrder};
 
 fn hex_bytes(input: &str) -> Vec<u8> {
     let compact = input.split_whitespace().collect::<String>();
@@ -395,18 +395,50 @@ fn request_validation_rejects_duplicate_core_names_and_missing_optimization_targ
 }
 
 #[test]
+fn high_level_context_matches_python_style_api() {
+    let ctx = Context::new();
+    let x = ctx.bv_var("x", 8).unwrap();
+    assert_eq!(ctx.bv_var("x", 8).unwrap(), x);
+    assert!(ctx.bv_var("x", 16).is_err());
+    let expr = ctx
+        .bv_mul(
+            &ctx.bv_add(&x, 1u64).unwrap(),
+            ctx.bv_and(&x, 0xffu64).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(expr.width().unwrap(), 8);
+    assert_eq!(
+        expr.to_smt2(-1).unwrap(),
+        "(bvmul (bvadd x #x01) (bvand x #xff)) ; #5"
+    );
+    let assertion = ctx.bv_eq(&x, 1u64).unwrap();
+    ctx.assert_(&assertion).unwrap();
+    assert_eq!(ctx.assertions().unwrap(), vec![assertion]);
+    let request = ctx
+        .build_solve_request(0x0102_0304, 500, true, false)
+        .unwrap();
+    assert_eq!(request[0..4], *b"SMTQ");
+    assert_eq!(
+        ctx.to_smt2().unwrap().lines().next().unwrap(),
+        "(set-logic QF_BV)"
+    );
+    let walked = expr.walk(WalkOrder::Post, true).unwrap();
+    assert_eq!(walked.last().unwrap().id(), expr.id());
+}
+
+#[test]
 fn transport_frames_are_little_endian_and_exact_length() {
     let payload = b"SMTQ-example";
-    let frame = smt_wire::le::encode_transport_frame(payload).unwrap();
+    let frame = smt_wire::raw::le::encode_transport_frame(payload).unwrap();
     assert_eq!(&frame[..4], &(payload.len() as u32).to_le_bytes());
     assert_eq!(
-        smt_wire::le::decode_transport_frame(&frame).unwrap(),
+        smt_wire::raw::le::decode_transport_frame(&frame).unwrap(),
         payload
     );
 
     let mut too_long = frame.clone();
     too_long.push(0);
-    assert!(smt_wire::le::decode_transport_frame(&too_long).is_err());
+    assert!(smt_wire::raw::le::decode_transport_frame(&too_long).is_err());
 
     assert_eq!(status::SAT, 1);
     assert_eq!(Sort::Bool.sort_bit(), 0x8000_0000);

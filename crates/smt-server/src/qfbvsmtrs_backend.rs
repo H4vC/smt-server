@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use smt_wire::{
+use smt_wire::raw::{
     tag, BinaryRequest, BlobRef, Command, ModelBlock, ModelEntry, OptimizationValueBlock,
     ScalarValue, SimplifyBlock, Sort, UnsatCoreBlock, WireError,
 };
@@ -96,7 +96,7 @@ fn model_to_wire_for_request(
         let key = (name.to_owned(), sort, width);
         if let Some(value) = values.get(&key).cloned() {
             entries.push(ModelEntry {
-                node_ref: smt_wire::NodeRef::new(sort, index)?,
+                node_ref: smt_wire::raw::NodeRef::new(sort, index)?,
                 value,
             });
         }

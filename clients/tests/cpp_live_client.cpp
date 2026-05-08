@@ -9,25 +9,20 @@ int main(int argc, char** argv) {
     const std::string host = argv[1];
     const auto port = static_cast<uint16_t>(std::stoul(argv[2]));
 
-    smt_wire::Builder b;
-    auto x = b.bv_var("cpp_x", 4);
-    b.assert_(b.bv_eq(x, b.bv_const(2, 4)));
+    smt_wire::Context ctx;
+    auto x = ctx.bv_var("cpp_x", 4);
+    ctx.assert_(ctx.bv_eq(x, 2u));
 
-    smt_wire::TcpClient client(host, port);
-    auto response = client.send_request(b.build_solve_request(0x4001u, 0, true, false));
+    smt_wire::Client client(host, port);
+    auto response = client.solve(ctx, 0, true, false, 0x4001u);
     assert(response.request_id == 0x4001u);
-    assert(response.status == smt_wire::status::SAT);
-    assert(response.flags == smt_wire::response_flags::HAS_MODEL);
-    auto model = smt_wire::parse_model_payload(response.payload);
-    bool saw_value = false;
-    for (const auto& entry : model) {
-        if (entry.value.width == 4 && !entry.value.bytes.empty() && entry.value.bytes[0] == 2) {
-            saw_value = true;
-        }
-    }
-    assert(saw_value);
+    assert(response.status == smt_wire::Status::Sat);
+    assert(response.has_model);
+    auto value = response.model.get(x.as_term());
+    assert(value != nullptr);
+    assert(value->width == 4 && !value->bytes.empty() && value->bytes[0] == 2);
 
-    auto text = client.send_text(
+    auto text = client.smt2(
         "(set-logic QF_BV)"
         "(declare-const |cpp y| (_ BitVec 2))"
         "(assert (= |cpp y| #b10))"

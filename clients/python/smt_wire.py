@@ -1935,6 +1935,8 @@ __all__ = [
     "Status",
     "Sort",
     "Op",
+    "Command",
+    "RequestFlag",
     "ResponseFlag",
     "ScalarValue",
     "Model",

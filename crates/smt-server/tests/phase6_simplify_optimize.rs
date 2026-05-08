@@ -1,7 +1,7 @@
 use smt_server::{
     handle_binary_frame, Backend, BinbitBackend, QfbvsmtrsBackend, QueryResult, Z3Backend,
 };
-use smt_wire::{
+use smt_wire::raw::{
     response_flags, BinaryRequest, BinaryResponse, ExprBuilder, ModelBlock, ModelEntry,
     OptimizationValueBlock, ScalarValue, SimplifyBlock, Status, UnsatCoreBlock,
 };

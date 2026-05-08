@@ -216,6 +216,55 @@ impl Tag {
         }
     }
 
+    pub const fn smt_symbol(self) -> &'static str {
+        match self {
+            Tag::BvVar => "var",
+            Tag::BvConst => "const",
+            Tag::BvNot => "bvnot",
+            Tag::BvNeg => "bvneg",
+            Tag::BvAnd => "bvand",
+            Tag::BvOr => "bvor",
+            Tag::BvXor => "bvxor",
+            Tag::BvAdd => "bvadd",
+            Tag::BvSub => "bvsub",
+            Tag::BvMul => "bvmul",
+            Tag::BvUdiv => "bvudiv",
+            Tag::BvUrem => "bvurem",
+            Tag::BvSdiv => "bvsdiv",
+            Tag::BvSrem => "bvsrem",
+            Tag::BvSmod => "bvsmod",
+            Tag::BvShl => "bvshl",
+            Tag::BvLshr => "bvlshr",
+            Tag::BvAshr => "bvashr",
+            Tag::BvExtract => "extract",
+            Tag::BvConcat => "concat",
+            Tag::BvZext => "zero_extend",
+            Tag::BvSext => "sign_extend",
+            Tag::BvIte => "ite",
+            Tag::BvSelect => "select",
+            Tag::BoolTrue => "true",
+            Tag::BoolFalse => "false",
+            Tag::BoolVar => "var",
+            Tag::BoolNot => "not",
+            Tag::BoolAnd => "and",
+            Tag::BoolOr => "or",
+            Tag::BoolImplies => "=>",
+            Tag::BvEq => "=",
+            Tag::BvUlt => "bvult",
+            Tag::BvUle => "bvule",
+            Tag::BvSlt => "bvslt",
+            Tag::BvSle => "bvsle",
+            Tag::UaddOvf => "bvuaddo",
+            Tag::SaddOvf => "bvsaddo",
+            Tag::UsubOvf => "bvusubo",
+            Tag::SsubOvf => "bvssubo",
+            Tag::UmulOvf => "bvumulo",
+            Tag::SmulOvf => "bvsmulo",
+            Tag::NegOvf => "bvnego",
+            Tag::SdivOvf => "bvsdivo",
+        }
+    }
+
     pub const fn result_sort(self) -> Sort {
         match self {
             Tag::BvVar

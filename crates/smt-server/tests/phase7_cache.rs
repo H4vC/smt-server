@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use smt_server::{dispatch_payload_with_cache, Backend, PooledBackend, QueryResult, ResponseCache};
-use smt_wire::{request_flags, BinaryRequest, BinaryResponse, ExprBuilder, ModelBlock};
+use smt_wire::raw::{request_flags, BinaryRequest, BinaryResponse, ExprBuilder, ModelBlock};
 
 struct CountingBackend {
     count: Arc<AtomicUsize>,

@@ -4,7 +4,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::string::FromUtf8Error;
 use std::time::Duration;
 
-use crate::{BinaryResponse, WireError};
+use crate::response::BinaryResponse;
+use crate::WireError;
 
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 

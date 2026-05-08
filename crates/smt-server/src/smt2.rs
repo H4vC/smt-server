@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use smt_wire::{request_flags, tag, BinaryRequest, BlobRef, ExprView, NodeRef, Sort, WireError};
+use smt_wire::raw::{
+    request_flags, tag, BinaryRequest, BlobRef, ExprView, NodeRef, Sort, WireError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Smt2Variable {

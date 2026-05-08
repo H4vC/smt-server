@@ -1,4 +1,4 @@
-use smt_wire::{constants::tag, le, ExprView, ExpressionBuffer, NodeRef, RawNode};
+use smt_wire::raw::{constants::tag, le, ExprView, ExpressionBuffer, NodeRef, RawNode};
 
 #[test]
 fn empty_expression_buffer_golden_bytes() {

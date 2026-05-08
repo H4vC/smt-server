@@ -2,7 +2,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use smt_wire::BinaryRequest;
+use smt_wire::raw::BinaryRequest;
 
 use crate::backend::{Backend, CancellationToken, QueryResult, SolveContext};
 

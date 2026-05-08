@@ -7,7 +7,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use smt_wire::{le, BinaryResponse, Status};
+use smt_wire::raw::{le, BinaryResponse, Status};
 
 use crate::backend::Backend;
 use crate::cache::{
@@ -142,7 +142,7 @@ pub fn dispatch_payload_with_cache(
     cache: Option<&ResponseCache>,
 ) -> Vec<u8> {
     if let Some(cache) = cache.filter(|cache| {
-        smt_wire::request::is_binary_request_payload(payload) && cache.accepts_payload(payload)
+        smt_wire::raw::request::is_binary_request_payload(payload) && cache.accepts_payload(payload)
     }) {
         let key = cache_key_for_payload(payload);
         let request_id = binary_request_id(payload);
@@ -170,7 +170,7 @@ fn is_cacheable_binary_response(response: &[u8]) -> bool {
 }
 
 pub fn dispatch_payload(payload: &[u8], backend: &dyn Backend) -> Vec<u8> {
-    if smt_wire::request::is_binary_request_payload(payload) {
+    if smt_wire::raw::request::is_binary_request_payload(payload) {
         match handle_binary_frame(payload, backend).and_then(|response| response.encode()) {
             Ok(bytes) => bytes,
             Err(err) => binary_error_response(&err.to_string()),

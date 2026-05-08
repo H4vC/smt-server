@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use smt_wire::{BinaryRequest, Command};
+use smt_wire::raw::{BinaryRequest, Command};
 
 use crate::backend::{Backend, QueryResult, SolveContext};
 
