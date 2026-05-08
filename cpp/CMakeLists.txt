@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(smt_wire LANGUAGES CXX)
+project(smt_wire VERSION 0.1.0 LANGUAGES CXX)
+
+include(CMakePackageConfigHelpers)
+include(GNUInstallDirs)
 
 option(SMT_WIRE_CPP_BUILD_TESTS "Build smt-wire C++ tests" ${PROJECT_IS_TOP_LEVEL})
 
@@ -18,6 +21,37 @@ target_include_directories(
 if(WIN32)
   target_link_libraries(smt_wire INTERFACE ws2_32)
 endif()
+
+install(
+  TARGETS smt_wire
+  EXPORT smt_wireTargets
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(
+  DIRECTORY include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(
+  EXPORT smt_wireTargets
+  NAMESPACE smt_wire::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smt_wire
+)
+configure_package_config_file(
+  cmake/smt_wireConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/smt_wireConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smt_wire
+)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/smt_wireConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+install(
+  FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/smt_wireConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/smt_wireConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smt_wire
+)
 
 if(SMT_WIRE_CPP_BUILD_TESTS)
   enable_testing()

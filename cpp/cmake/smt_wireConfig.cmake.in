@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/smt_wireTargets.cmake")
+
+check_required_components(smt_wire)
