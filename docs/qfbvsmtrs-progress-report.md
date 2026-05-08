@@ -41,8 +41,8 @@ cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
-python clients/tests/test_python_client.py
-python clients/tests/test_live_server.py
+python3 python/tests/test_python_client.py
+python3 python/tests/test_live_server.py
 ```
 
 Extended randomized validation also passed in this snapshot:

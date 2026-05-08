@@ -1,4 +1,4 @@
-#include "../cpp/smt_wire.hpp"
+#include <smt_wire/smt_wire.hpp>
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>

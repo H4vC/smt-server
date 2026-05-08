@@ -1,6 +1,6 @@
 # Idiomatic client APIs
 
-The Python `clients/python/smt_wire.py` API is the conceptual source of truth for user-facing clients.
+The Python `python/smt_wire.py` API is the conceptual source of truth for user-facing clients.
 
 ## Shape
 

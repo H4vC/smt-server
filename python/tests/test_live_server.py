@@ -14,8 +14,8 @@ import sys
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-CLIENT_ROOT = REPO_ROOT / "clients" / "python"
-sys.path.insert(0, str(CLIENT_ROOT))
+PYTHON_ROOT = REPO_ROOT / "python"
+sys.path.insert(0, str(PYTHON_ROOT))
 
 import smt_wire as smt  # noqa: E402
 
@@ -109,7 +109,9 @@ def test_cpp_client_live_round_trip(port: int) -> None:
         "-Wall",
         "-Wextra",
         "-Werror",
-        str(REPO_ROOT / "clients" / "tests" / "cpp_live_client.cpp"),
+        "-I",
+        str(REPO_ROOT / "cpp" / "include"),
+        str(REPO_ROOT / "cpp" / "tests" / "cpp_live_client.cpp"),
         "-o",
         str(exe),
     ]

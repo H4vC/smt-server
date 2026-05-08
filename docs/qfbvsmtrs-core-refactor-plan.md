@@ -501,9 +501,9 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
-python clients/tests/test_python_client.py
-python clients/tests/test_live_server.py
-"/c/Program Files/LLVM/bin/clang++" -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o /tmp/cpp_client_smoke && /tmp/cpp_client_smoke
+python3 python/tests/test_python_client.py
+python3 python/tests/test_live_server.py
+"/c/Program Files/LLVM/bin/clang++" -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/cpp_client_smoke.cpp -o /tmp/cpp_client_smoke && /tmp/cpp_client_smoke
 ```
 
 Recommended qfbvsmtrs-specific gates:

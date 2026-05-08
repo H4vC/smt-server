@@ -6,8 +6,8 @@ It targets binary analysis, lifting, symbolic execution, and IR experiments wher
 
 ## Clients
 
-- C++: single C++17 header at `clients/cpp/smt_wire.hpp`.
-- Python: dependency-free module at `clients/python/smt_wire.py`.
+- C++: header-only C++17 package under `cpp/`.
+- Python: dependency-free package under `python/`, installable with `pip install git+...`.
 - Rust: `smt-wire` crate with an idiomatic `Context`/term/`Client` API; protocol internals are isolated for the server.
 
 ## Backends
@@ -59,7 +59,7 @@ Payload formats:
 
 ## Python client example
 
-The Python client can be copied into a project or imported by adding `clients/python` to `PYTHONPATH`.
+The Python client can be installed with `pip install git+<repo-url>` or used directly by adding `python/` to `PYTHONPATH`.
 
 ```python
 import smt_wire as smt
@@ -143,7 +143,7 @@ if response.status == Status::Sat {
 The C++ helper is a dependency-free C++17 header:
 
 ```cpp
-#include "smt_wire.hpp"
+#include <smt_wire/smt_wire.hpp>
 
 smt_wire::Context ctx;
 auto x = ctx.bv_var("x", 8);
@@ -175,11 +175,14 @@ cargo run -p qfbvsmtrs --bin qfbvsmtrs_bench -- path/to/query.smt2
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
-python clients/tests/test_python_client.py
-python clients/tests/test_live_server.py
+python3 python/tests/test_python_client.py
+python3 python/tests/test_live_server.py
+cmake -S . -B target/cpp-cmake -DSMT_WIRE_CPP_BUILD_TESTS=ON
+cmake --build target/cpp-cmake
+ctest --test-dir target/cpp-cmake --output-on-failure
 ```
 
-`clients/tests/test_live_server.py` also exercises the live C++ TCP client when a compiler is available.
+`python/tests/test_live_server.py` also exercises the live C++ TCP client when a compiler is available.
 
 The default Rumba integration test uses embedded samples. The full CSV dataset test needs Rumba's dataset directory; clone `https://github.com/thalium/rumba` next to this repository or set `SMT_SERVER_RUMBA_DATASET_DIR`. Run the full CSV suite through the binary simplify path with:
 
@@ -200,7 +203,7 @@ cargo fuzz run smt2_pipeline --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 Standalone C++ smoke test:
 
 ```sh
-c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_client_smoke
+c++ -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/cpp_client_smoke.cpp -o cpp_client_smoke
 ./cpp_client_smoke
 ```
 
@@ -209,8 +212,8 @@ c++ -std=c++17 -Wall -Wextra -Werror clients/tests/cpp_client_smoke.cpp -o cpp_c
 - `crates/smt-wire` — Rust high-level client API plus server-side wire-format internals and validators.
 - `crates/qfbvsmtrs` — standalone pure-Rust `QF_BV` bit-blasting solver crate and CLI.
 - `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend.
-- `clients/python` — Python single-file client helper.
-- `clients/cpp` — C++17 single-header client helper.
+- `python` — Python client package and tests.
+- `cpp` — C++17 header-only package, CMake target, and tests.
 - `docs/smt-wire-format-plan.md` — binary wire-format details.
 - `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates.
 - `docs/qfbvsmtrs-corpus-results.md` — latest SMT-LIB `QF_BV` corpus-run results.
