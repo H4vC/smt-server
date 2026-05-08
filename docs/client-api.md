@@ -10,6 +10,7 @@ The user-facing clients expose the same model: a `Context` owns an append-only t
 - Integer operands are coerced to bit-vector constants using the width of the bit-vector operand.
 - `push`/`pop` are client-side assertion-scope operations; the server still receives one complete stateless request.
 - Serialization, DAG compaction, request envelopes, TCP framing, and response payload parsing are implementation details behind `Client`.
+- When no address is passed, clients read `SMT_SERVER_ADDRESS=<host>:<port>` and otherwise fall back to `127.0.0.1:9123`.
 
 The full side-by-side walkthroughs are:
 
@@ -40,7 +41,7 @@ ctx = smt.Context()
 x = ctx.bv_var("x", 8)
 ctx.assert_(ctx.bv_eq(x, 42))
 
-with smt.Client("127.0.0.1", 9123) as client:
+with smt.Client() as client:
     response = client.solve(ctx)
 
 print(response.status)
@@ -67,7 +68,7 @@ smt_wire::Context ctx;
 auto x = ctx.bv_var("x", 8);
 ctx.assert_(ctx.bv_eq(x, 42u));
 
-smt_wire::Client client("127.0.0.1", 9123);
+smt_wire::Client client;
 auto response = client.solve(ctx);
 ```
 
@@ -84,7 +85,7 @@ let ctx = Context::new();
 let x = ctx.bv_var("x", 8)?;
 ctx.assert_(&ctx.bv_eq(&x, 42u64)?)?;
 
-let mut client = Client::connect("127.0.0.1:9123")?;
+let mut client = Client::connect_default()?;
 let response = client.solve(&ctx)?;
 if response.status == Status::Sat {
     if let Some(model) = response.model {

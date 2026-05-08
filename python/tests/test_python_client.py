@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 
@@ -24,6 +25,28 @@ def test_python_client_matches_simple_sat_golden_vector():
         "1f 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
         "00 00 00 00 01 00 00 00 78 02 00 00 80"
     )
+
+
+def test_default_server_address_uses_environment():
+    old = os.environ.get(smt.SERVER_ADDRESS_ENV)
+    try:
+        os.environ.pop(smt.SERVER_ADDRESS_ENV, None)
+        assert smt.default_server_address() == ("127.0.0.1", 9123)
+        os.environ[smt.SERVER_ADDRESS_ENV] = "example.com:1234"
+        assert smt.default_server_address() == ("example.com", 1234)
+        os.environ[smt.SERVER_ADDRESS_ENV] = "[::1]:9123"
+        assert smt.default_server_address() == ("::1", 9123)
+        os.environ[smt.SERVER_ADDRESS_ENV] = "missing-port"
+        try:
+            smt.default_server_address()
+            raise AssertionError("expected bad server address to be rejected")
+        except ValueError:
+            pass
+    finally:
+        if old is None:
+            os.environ.pop(smt.SERVER_ADDRESS_ENV, None)
+        else:
+            os.environ[smt.SERVER_ADDRESS_ENV] = old
 
 
 def test_context_ids_and_repr_are_debug_friendly():
@@ -290,6 +313,7 @@ def test_python_client_rejects_oversized_response_before_allocation():
 
 if __name__ == "__main__":
     test_python_client_matches_simple_sat_golden_vector()
+    test_default_server_address_uses_environment()
     test_context_ids_and_repr_are_debug_friendly()
     test_int_enums_print_symbolically()
     test_terms_use_handle_equality_and_hashing()

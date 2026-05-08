@@ -85,6 +85,19 @@ class LiveServer:
             self.proc.wait(timeout=5)
 
 
+def test_python_client_env_default_round_trip(port: int) -> None:
+    old = os.environ.get(smt.SERVER_ADDRESS_ENV)
+    os.environ[smt.SERVER_ADDRESS_ENV] = f"127.0.0.1:{port}"
+    try:
+        with smt.Client(timeout=5) as client:
+            test_python_client_binary_round_trip(client)
+    finally:
+        if old is None:
+            os.environ.pop(smt.SERVER_ADDRESS_ENV, None)
+        else:
+            os.environ[smt.SERVER_ADDRESS_ENV] = old
+
+
 def test_python_client_binary_round_trip(client: smt.Client) -> None:
     ctx = smt.Context()
     x = ctx.bv_var("x", 4)
@@ -141,6 +154,7 @@ def test_text_smtlib_round_trip(client: smt.Client) -> None:
 
 def main() -> None:
     with LiveServer() as server:
+        test_python_client_env_default_round_trip(server.port)
         with smt.Client("127.0.0.1", server.port, timeout=5) as client:
             test_python_client_binary_round_trip(client)
             test_binary_cache_rebinds_response_ids(client)

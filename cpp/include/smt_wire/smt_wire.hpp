@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cctype>
 #include <atomic>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -42,6 +43,44 @@ constexpr uint32_t BOOL_BIT = 0x80000000u;
 constexpr uint32_t INDEX_MASK = 0x7fffffffu;
 constexpr uint32_t MAX_WIDTH = 65536u;
 constexpr size_t DEFAULT_MAX_RESPONSE_BYTES = 64u * 1024u * 1024u;
+constexpr const char* SERVER_ADDRESS_ENV = "SMT_SERVER_ADDRESS";
+constexpr const char* DEFAULT_SERVER_HOST = "127.0.0.1";
+constexpr uint16_t DEFAULT_SERVER_PORT = 9123;
+
+struct ServerAddress { std::string host; uint16_t port; };
+
+inline ServerAddress parse_server_address(const std::string& address) {
+    if (address.empty()) throw std::invalid_argument("server address must not be empty");
+    std::string host;
+    std::string port_text;
+    if (address.front() == '[') {
+        auto end = address.find(']');
+        if (end == std::string::npos || end + 1 >= address.size() || address[end + 1] != ':') throw std::invalid_argument("server address must be host:port or [ipv6]:port");
+        host = address.substr(1, end - 1);
+        port_text = address.substr(end + 2);
+    } else {
+        auto sep = address.rfind(':');
+        if (sep == std::string::npos) throw std::invalid_argument("server address must be host:port");
+        host = address.substr(0, sep);
+        port_text = address.substr(sep + 1);
+    }
+    if (host.empty()) throw std::invalid_argument("server address host must not be empty");
+    if (port_text.empty()) throw std::invalid_argument("server address port must not be empty");
+    unsigned long port = 0;
+    for (char c: port_text) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) throw std::invalid_argument("server address port must be an integer");
+        port = port * 10u + static_cast<unsigned long>(c - '0');
+        if (port > 65535u) throw std::invalid_argument("server address port must fit in uint16_t");
+    }
+    return {host, static_cast<uint16_t>(port)};
+}
+
+inline ServerAddress default_server_address() {
+    if (const char* value = std::getenv(SERVER_ADDRESS_ENV)) {
+        if (*value != '\0') return parse_server_address(value);
+    }
+    return {DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT};
+}
 
 namespace detail {
 namespace tag {
@@ -660,7 +699,12 @@ struct OptimizationResult { uint32_t request_id; Status status; uint8_t flags; s
 
 class Client {
 public:
-    Client() = default; Client(const std::string& host, uint16_t port) : transport_(host, port) {}
+    Client() : Client(default_server_address()) {}
+    explicit Client(const ServerAddress& address) : transport_(address.host, address.port) {}
+    explicit Client(const std::string& address) : Client(parse_server_address(address)) {}
+    Client(const std::string& host, uint16_t port) : transport_(host, port) {}
+    static Client connect() { return Client(); }
+    static Client connect(const std::string& address) { return Client(address); }
     static Client connect(const std::string& host, uint16_t port) { return Client(host, port); }
     void set_max_response_bytes(size_t n) { transport_.set_max_response_bytes(n); }
     Response solve(const Context& ctx, uint32_t budget_ms=0, bool want_model=true, bool want_core=false, uint32_t request_id=0) { auto req=ctx.build_solve_request(request_id?request_id:next_id_++,budget_ms,want_model,want_core); return solve_response(transport_.send_request(req.payload), req); }

@@ -8,6 +8,15 @@ use crate::response::BinaryResponse;
 use crate::WireError;
 
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub const SERVER_ADDRESS_ENV: &str = "SMT_SERVER_ADDRESS";
+pub const DEFAULT_SERVER_ADDRESS: &str = "127.0.0.1:9123";
+
+pub fn default_server_address() -> String {
+    std::env::var(SERVER_ADDRESS_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SERVER_ADDRESS.to_owned())
+}
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -67,6 +76,11 @@ pub struct TcpClient {
 }
 
 impl TcpClient {
+    pub fn connect_default() -> ClientResult<Self> {
+        let address = default_server_address();
+        Self::connect(address.as_str())
+    }
+
     pub fn connect(addr: impl ToSocketAddrs) -> ClientResult<Self> {
         Ok(Self {
             stream: TcpStream::connect(addr)?,

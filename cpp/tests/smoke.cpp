@@ -33,6 +33,13 @@ int main() {
     auto wide = masked.bv_const_wide(raw_wide, 65);
     assert(wide.width() == 65);
 
+    auto parsed_address = smt_wire::parse_server_address("example.com:1234");
+    assert(parsed_address.host == "example.com");
+    assert(parsed_address.port == 1234);
+    parsed_address = smt_wire::parse_server_address("[::1]:9123");
+    assert(parsed_address.host == "::1");
+    assert(parsed_address.port == 9123);
+
     assert((smt_wire::ScalarValue{0, {1}}).to_u64() == 1);
     assert((smt_wire::ScalarValue{0, {1}}).to_i64() == 1);
     assert((smt_wire::ScalarValue{8, {0xff}}).to_u64() == 255);

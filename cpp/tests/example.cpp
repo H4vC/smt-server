@@ -67,7 +67,8 @@ int main() {
 
     // Start the server first:
     //   cargo run -p smt-server -- 127.0.0.1:9123
-    smt_wire::Client client("127.0.0.1", 9123);
+    // Or set SMT_SERVER_ADDRESS=<host>:<port> to choose a different default.
+    smt_wire::Client client;
     auto resp = client.solve(ctx);
     std::cout << status_name(resp.status) << "\n";
     if (resp.status == smt_wire::Status::Sat && resp.has_model) {

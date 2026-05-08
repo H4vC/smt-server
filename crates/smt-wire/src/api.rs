@@ -1675,6 +1675,13 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn connect_default() -> ClientResult<Self> {
+        Ok(Self {
+            transport: TcpClient::connect_default()?,
+            next_request_id: 1,
+        })
+    }
+
     pub fn connect(addr: impl ToSocketAddrs) -> ClientResult<Self> {
         Ok(Self {
             transport: TcpClient::connect(addr)?,

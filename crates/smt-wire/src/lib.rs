@@ -22,7 +22,10 @@ pub use api::{
     BoolTerm, BvOperand, BvTerm, Client, Context, Model, OptimizationResult, OptimizeOptions,
     Response, SimplifyResult, SolveOptions, Term, WalkOrder,
 };
-pub use client::{ClientError, ClientResult};
+pub use client::{
+    default_server_address, ClientError, ClientResult, DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_SERVER_ADDRESS, SERVER_ADDRESS_ENV,
+};
 pub use constants::Tag as Op;
 pub use constants::{Status, Tag};
 pub use error::{Result, WireError};
@@ -52,7 +55,10 @@ pub mod raw {
     }
 
     pub use crate::builder::{Assertion, CompactedExpression, ExprBuilder};
-    pub use crate::client::{ClientError, ClientResult, TcpClient};
+    pub use crate::client::{
+        default_server_address, ClientError, ClientResult, TcpClient, DEFAULT_MAX_RESPONSE_BYTES,
+        DEFAULT_SERVER_ADDRESS, SERVER_ADDRESS_ENV,
+    };
     pub use crate::constants::{
         command, request_flags, response_flags, status, tag, Command, Status, Tag,
     };

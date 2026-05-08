@@ -34,7 +34,7 @@ target/debug/smt-server 127.0.0.1:9123 &
 server_pid=$!
 trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 sleep 1
-ctest --test-dir /tmp/smt_cpp_cmake --output-on-failure
+SMT_SERVER_ADDRESS=127.0.0.1:9123 ctest --test-dir /tmp/smt_cpp_cmake --output-on-failure
 ```
 
 The checked-in suite includes exhaustive 4-bit circuit tests, randomized circuit properties, Tseitin truth-table tests across SAT backends, known-answer SMT-LIB fixtures, Rust Z3 differential smoke tests, standalone qfbvsmtrs tests, server binary/text/cache/racing tests, live client tests, and C++/Python smoke tests.

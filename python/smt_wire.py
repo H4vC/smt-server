@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, IntEnum, IntFlag
 import itertools
+import os
 import re
 import socket
 import struct
@@ -24,6 +25,41 @@ BOOL_BIT = 0x80000000
 INDEX_MASK = 0x7FFFFFFF
 MAX_WIDTH = 65536
 DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+SERVER_ADDRESS_ENV = "SMT_SERVER_ADDRESS"
+DEFAULT_SERVER_HOST = "127.0.0.1"
+DEFAULT_SERVER_PORT = 9123
+
+
+def _parse_server_address(address: str) -> tuple[str, int]:
+    address = address.strip()
+    if not address:
+        raise ValueError("server address must not be empty")
+    if address.startswith("["):
+        end = address.find("]")
+        if end < 0 or end + 1 >= len(address) or address[end + 1] != ":":
+            raise ValueError("server address must be host:port or [ipv6]:port")
+        host = address[1:end]
+        port_text = address[end + 2 :]
+    else:
+        host, sep, port_text = address.rpartition(":")
+        if not sep:
+            raise ValueError("server address must be host:port")
+    if not host:
+        raise ValueError("server address host must not be empty")
+    try:
+        port = int(port_text, 10)
+    except ValueError as exc:
+        raise ValueError("server address port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise ValueError("server address port must fit in u16")
+    return host, port
+
+
+def default_server_address() -> tuple[str, int]:
+    address = os.environ.get(SERVER_ADDRESS_ENV)
+    if address:
+        return _parse_server_address(address)
+    return DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
 
 
 class SmtError(ValueError):
@@ -1547,8 +1583,8 @@ class Client:
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
-        port: int = 9123,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
         timeout: Optional[float] = None,
         sock: Optional[socket.socket] = None,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
@@ -1557,11 +1593,15 @@ class Client:
             raise ValueError("max_response_bytes must be non-negative")
         self.max_response_bytes = max_response_bytes
         self._request_ids = itertools.count(1)
-        self._sock = (
-            sock
-            if sock is not None
-            else socket.create_connection((host, port), timeout=timeout)
-        )
+        if sock is not None:
+            self._sock = sock
+        else:
+            default_host, default_port = default_server_address()
+            if host is None:
+                host = default_host
+            if port is None:
+                port = default_port
+            self._sock = socket.create_connection((host, port), timeout=timeout)
         if timeout is not None:
             self._sock.settimeout(timeout)
 
@@ -1949,4 +1989,8 @@ __all__ = [
     "ContextMismatchError",
     "ProtocolError",
     "DEFAULT_MAX_RESPONSE_BYTES",
+    "SERVER_ADDRESS_ENV",
+    "DEFAULT_SERVER_HOST",
+    "DEFAULT_SERVER_PORT",
+    "default_server_address",
 ]

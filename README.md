@@ -43,7 +43,7 @@ cargo build --workspace
 cargo run -p smt-server -- 127.0.0.1:9123
 ```
 
-If no address is provided, the server listens on `127.0.0.1:9123`.
+If no address is provided, the server listens on `127.0.0.1:9123`. Clients use `SMT_SERVER_ADDRESS=<host>:<port>` as their default connection target, falling back to `127.0.0.1:9123` when the variable is unset.
 
 Requests use length-prefixed frames:
 
@@ -68,7 +68,7 @@ ctx = smt.Context()
 x = ctx.bv_var("x", 8)
 ctx.assert_(ctx.bv_eq(x, 42))
 
-with smt.Client("127.0.0.1", 9123) as client:
+with smt.Client() as client:
     response = client.solve(ctx)  # want_model=True by default
 
 print(response.status)       # Status.SAT
@@ -91,7 +91,7 @@ ctx = smt.Context()
 x = ctx.bv_var("x", 64)
 target = x + 0
 
-with smt.Client("127.0.0.1", 9123) as client:
+with smt.Client() as client:
     simplified = client.simplify(target)
 
 if simplified.term is not None:
@@ -115,7 +115,7 @@ A text frame can contain an SMT-LIB script:
 The text frontend supports declarations, assertions, named assertions, `check-sat`, `check-sat-assuming`, `get-model`, `get-value`, `get-unsat-core`, `let`, and common bit-vector operations. It rejects stateful incremental commands such as `push` and `pop`.
 
 ```python
-with smt.Client("127.0.0.1", 9123) as client:
+with smt.Client() as client:
     print(client.smt2(script))
 ```
 
@@ -130,7 +130,7 @@ let ctx = Context::new();
 let x = ctx.bv_var("x", 8).unwrap();
 ctx.assert_(&ctx.bv_eq(&x, 42u64).unwrap()).unwrap();
 
-let mut client = Client::connect("127.0.0.1:9123").unwrap();
+let mut client = Client::connect_default().unwrap();
 let response = client.solve(&ctx).unwrap();
 println!("{:?}", response.status);
 if response.status == Status::Sat {
@@ -153,7 +153,7 @@ smt_wire::Context ctx;
 auto x = ctx.bv_var("x", 8);
 ctx.assert_(ctx.bv_eq(x, 42u));
 
-smt_wire::Client client("127.0.0.1", 9123);
+smt_wire::Client client;
 auto response = client.solve(ctx);
 ```
 

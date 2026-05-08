@@ -79,6 +79,7 @@ jobs:
           if z3_dirs:
               for var in ("PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
                   env[var] = os.pathsep.join(z3_dirs + [env.get(var, "")])
+          env["SMT_SERVER_ADDRESS"] = "127.0.0.1:9123"
 
           exe = root / "target" / "debug" / ("smt-server.exe" if os.name == "nt" else "smt-server")
           log_path = root / "target" / "cpp-e2e-server.log"
@@ -98,7 +99,7 @@ jobs:
                           time.sleep(0.05)
                   else:
                       raise TimeoutError(f"smt-server did not start: {last_error}")
-                  subprocess.check_call(["ctest", "--test-dir", str(root / "cpp" / "build"), "--output-on-failure", "-C", "Debug"])
+                  subprocess.check_call(["ctest", "--test-dir", str(root / "cpp" / "build"), "--output-on-failure", "-C", "Debug"], env=env)
               except Exception:
                   log.flush()
                   try:

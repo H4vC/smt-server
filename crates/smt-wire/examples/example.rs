@@ -58,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start the server first:
     //   cargo run -p smt-server -- 127.0.0.1:9123
-    let mut client = Client::connect("127.0.0.1:9123")?;
+    // Or set SMT_SERVER_ADDRESS=<host>:<port> to choose a different default.
+    let mut client = Client::connect_default()?;
     let resp = client.solve(&ctx)?;
     println!("{}", status_name(resp.status));
     if resp.status == Status::Sat {
