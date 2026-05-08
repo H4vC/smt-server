@@ -181,7 +181,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check --manifest-path crates/qfbvsmtrs/fuzz/Cargo.toml
 python3 python/tests/test_python_client.py
 python3 python/tests/test_live_server.py
-cmake -S . -B target/cpp-cmake -DSMT_WIRE_CPP_BUILD_TESTS=ON
+cmake -S cpp -B target/cpp-cmake
 cmake --build target/cpp-cmake
 ctest --test-dir target/cpp-cmake --output-on-failure
 ```
@@ -218,7 +218,9 @@ c++ -std=c++17 -Wall -Wextra -Werror -I cpp/include cpp/tests/cpp_client_smoke.c
 - `crates/smt-server` — TCP server, Rumba simplifier integration, solver backend integration, SMT-LIB frontend.
 - `python` — Python client package and tests.
 - `cpp` — C++17 header-only package, CMake target, and tests.
-- `docs/smt-wire-format-plan.md` — binary wire-format details.
-- `docs/qfbvsmtrs-production.md` — qfbvsmtrs production validation gates.
-- `docs/qfbvsmtrs-corpus-results.md` — latest SMT-LIB `QF_BV` corpus-run results.
-- `docs` — backend notes and evaluation details.
+- `docs/architecture.md` — current crate/server/backend architecture.
+- `docs/client-api.md` — Python, C++, and Rust client API notes.
+- `docs/smt-wire-protocol.md` — binary wire protocol reference.
+- `docs/smtlib-frontend.md` — shared QF_BV SMT-LIB frontend behavior.
+- `docs/qfbvsmtrs-design.md` — pure-Rust solver design.
+- `docs/qfbvsmtrs-validation.md` — validation gates and latest corpus status.
