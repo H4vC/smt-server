@@ -17,5 +17,10 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+z3 = [
+    "z3-solver>=4.16.0.0",
+]
+
 [tool.setuptools]
-py-modules = ["smt_wire"]
+py-modules = ["smt_wire", "smt_z3_server"]
