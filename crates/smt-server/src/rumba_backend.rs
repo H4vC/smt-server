@@ -122,10 +122,7 @@ impl<'a> IslandSimplifier<'a> {
 
     fn process_uncached(&mut self, reference: NodeRef) -> smt_wire::Result<NodeRef> {
         let node = self.view.node(reference.index())?;
-        if reference.is_bv()
-            && is_mba_op(node.tag)
-            && (1..=MAX_RUMBA_WIDTH).contains(&node.width)
-        {
+        if reference.is_bv() && is_mba_op(node.tag) && (1..=MAX_RUMBA_WIDTH).contains(&node.width) {
             if let Some(simplified) = self.try_island(reference, &node)? {
                 return Ok(simplified);
             }
@@ -243,7 +240,10 @@ impl<'a> IslandSimplifier<'a> {
         let width = node.width;
         match node.tag {
             tag::BV_VAR => {
-                let name = self.view.blob_str(node.blob_ref(), "BV variable")?.to_owned();
+                let name = self
+                    .view
+                    .blob_str(node.blob_ref(), "BV variable")?
+                    .to_owned();
                 self.builder.bv_var(&name, width)
             }
             tag::BV_CONST => {
@@ -348,7 +348,10 @@ impl<'a> IslandSimplifier<'a> {
     ) -> smt_wire::Result<NodeRef> {
         let arity = node.arity as u32;
         if arity == 0 {
-            return Err(WireError::invalid("simplify", "n-ary node with no children"));
+            return Err(WireError::invalid(
+                "simplify",
+                "n-ary node with no children",
+            ));
         }
         let mut acc = self.processed_child(node, 0)?;
         for offset in 1..arity {
@@ -446,10 +449,7 @@ impl<'a> IslandConversion<'a> {
         self.convert(child)
     }
 
-    fn children2(
-        &mut self,
-        node: &RawNode,
-    ) -> smt_wire::Result<Option<(RumbaExpr, RumbaExpr)>> {
+    fn children2(&mut self, node: &RawNode) -> smt_wire::Result<Option<(RumbaExpr, RumbaExpr)>> {
         let Some(a) = self.convert_child(node, 0)? else {
             return Ok(None);
         };
@@ -478,15 +478,14 @@ impl<'a> IslandConversion<'a> {
         Ok(Some(terms))
     }
 
-    fn named(
-        &mut self,
-        reference: NodeRef,
-        node: &RawNode,
-    ) -> smt_wire::Result<Option<RumbaExpr>> {
+    fn named(&mut self, reference: NodeRef, node: &RawNode) -> smt_wire::Result<Option<RumbaExpr>> {
         if let Some(&id) = self.by_ref.get(&reference) {
             return Ok(Some(RumbaExpr::Var(VarId(id))));
         }
-        let name = self.view.blob_str(node.blob_ref(), "BV variable")?.to_owned();
+        let name = self
+            .view
+            .blob_str(node.blob_ref(), "BV variable")?
+            .to_owned();
         if let Some(&id) = self.by_name.get(&name) {
             self.by_ref.insert(reference, id);
             return Ok(Some(RumbaExpr::Var(VarId(id))));
