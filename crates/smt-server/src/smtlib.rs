@@ -3,10 +3,13 @@ use std::time::Duration;
 
 use smt_qfbv_smtlib::{lower_script, FrontendError, FrontendOptions, QfBvSink};
 use smt_wire::raw::{
-    BinaryRequest, ExprBuilder, ModelBlock, NodeRef, ScalarValue, UnsatCoreBlock, WireError,
+    BinaryRequest, BinaryResponse, ExprBuilder, ModelBlock, NodeRef, ScalarValue, UnsatCoreBlock,
+    WireError,
 };
 
 use crate::backend::{Backend, QueryResult, QueryStatus};
+use crate::protocol::response_from_query_result;
+use crate::recording::record_binary_pair;
 use crate::smt2::quote_symbol;
 
 #[derive(Debug, Clone)]
@@ -201,6 +204,21 @@ pub fn parse_smtlib_script(script: &str) -> smt_wire::Result<TextQuery> {
 }
 
 pub fn handle_text_frame(frame_payload: &[u8], backend: &dyn Backend) -> smt_wire::Result<Vec<u8>> {
+    handle_text_frame_inner(frame_payload, backend, false)
+}
+
+pub fn handle_text_frame_recording(
+    frame_payload: &[u8],
+    backend: &dyn Backend,
+) -> smt_wire::Result<Vec<u8>> {
+    handle_text_frame_inner(frame_payload, backend, true)
+}
+
+fn handle_text_frame_inner(
+    frame_payload: &[u8],
+    backend: &dyn Backend,
+    record: bool,
+) -> smt_wire::Result<Vec<u8>> {
     let script = std::str::from_utf8(frame_payload)
         .map_err(|_| WireError::invalid("SMT-LIB frontend", "text request is not UTF-8"))?;
     let query = match parse_smtlib_script(script) {
@@ -213,9 +231,43 @@ pub fn handle_text_frame(frame_payload: &[u8], backend: &dyn Backend) -> smt_wir
         }
     };
     match backend.handle(&query.request) {
-        Ok(result) => Ok(text_response(&query, result).into_bytes()),
-        Err(err) => Ok(format!("(error {:?})\n", err.to_string()).into_bytes()),
+        Ok(result) => {
+            if record {
+                record_text_binary_pair(&query, &result);
+            }
+            Ok(text_response(&query, result).into_bytes())
+        }
+        Err(err) => {
+            if record {
+                record_text_binary_error(&query, &err.to_string());
+            }
+            Ok(format!("(error {:?})\n", err.to_string()).into_bytes())
+        }
     }
+}
+
+fn record_text_binary_pair(query: &TextQuery, result: &QueryResult) {
+    let Ok(request) = query.request.encode() else {
+        return;
+    };
+    let Ok(response) = response_from_query_result(&query.request, result.clone())
+        .and_then(|response| response.encode())
+    else {
+        return;
+    };
+    record_binary_pair(&request, &response);
+}
+
+fn record_text_binary_error(query: &TextQuery, message: &str) {
+    let Ok(request) = query.request.encode() else {
+        return;
+    };
+    let Ok(response) = BinaryResponse::error(query.request.envelope.request_id, message)
+        .and_then(|response| response.encode())
+    else {
+        return;
+    };
+    record_binary_pair(&request, &response);
 }
 
 fn allows_qfbvsmtrs_text_fallback(backend: &dyn Backend) -> bool {

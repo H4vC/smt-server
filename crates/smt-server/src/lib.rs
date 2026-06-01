@@ -12,6 +12,7 @@ pub mod pool;
 pub mod protocol;
 pub mod qfbvsmtrs_backend;
 pub mod racing;
+pub(crate) mod recording;
 pub mod rumba_backend;
 pub mod server;
 pub mod smt2;

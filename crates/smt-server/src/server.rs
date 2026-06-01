@@ -14,7 +14,8 @@ use crate::cache::{
     binary_request_id, cache_key_for_payload, rebind_cached_response, ResponseCache,
 };
 use crate::protocol::handle_binary_frame;
-use crate::smtlib::handle_text_frame;
+use crate::recording::record_binary_pair;
+use crate::smtlib::handle_text_frame_recording;
 
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
@@ -147,7 +148,9 @@ pub fn dispatch_payload_with_cache(
         let key = cache_key_for_payload(payload);
         let request_id = binary_request_id(payload);
         if let Some(response) = cache.lookup(&key) {
-            return rebind_cached_response(response, request_id);
+            let response = rebind_cached_response(response, request_id);
+            record_binary_pair(payload, &response);
+            return response;
         }
         let response = dispatch_payload(payload, backend);
         if is_cacheable_binary_response(&response) {
@@ -171,12 +174,15 @@ fn is_cacheable_binary_response(response: &[u8]) -> bool {
 
 pub fn dispatch_payload(payload: &[u8], backend: &dyn Backend) -> Vec<u8> {
     if smt_wire::raw::request::is_binary_request_payload(payload) {
-        match handle_binary_frame(payload, backend).and_then(|response| response.encode()) {
-            Ok(bytes) => bytes,
-            Err(err) => binary_error_response(&err.to_string()),
-        }
+        let response =
+            match handle_binary_frame(payload, backend).and_then(|response| response.encode()) {
+                Ok(bytes) => bytes,
+                Err(err) => binary_error_response(&err.to_string()),
+            };
+        record_binary_pair(payload, &response);
+        response
     } else {
-        match handle_text_frame(payload, backend) {
+        match handle_text_frame_recording(payload, backend) {
             Ok(bytes) => bytes,
             Err(err) => format!("(error {:?})\n", err.to_string()).into_bytes(),
         }
