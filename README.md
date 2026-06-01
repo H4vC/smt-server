@@ -57,6 +57,37 @@ Payload formats:
 - binary `SMTQ` request produced by `smt-wire` or one of the clients;
 - SMT-LIB script as UTF-8 text.
 
+## Request recording
+
+The server records every handled binary request/response pair to a local corpus for replay and regression testing. SMT-LIB requests are recorded after successful lowering to the same binary wire request used by binary clients.
+
+Default location:
+
+```text
+~/.smt-server/requests
+```
+
+Override the directory with `SMT_SERVER_RECORD_DIR`:
+
+```sh
+SMT_SERVER_RECORD_DIR=/tmp/smt-corpus cargo run -p smt-server -- 127.0.0.1:9123
+```
+
+Set `SMT_SERVER_RECORD_DIR` to an empty value to disable recording:
+
+```sh
+SMT_SERVER_RECORD_DIR= cargo run -p smt-server -- 127.0.0.1:9123
+```
+
+Files are deduplicated by the BLAKE3 hash of the canonical binary request, with request and response `request_id` fields zeroed so equivalent requests share one entry:
+
+```text
+~/.smt-server/requests/ab/cd/<hash>.req.bin
+~/.smt-server/requests/ab/cd/<hash>.res.bin
+```
+
+Writes use temporary files and atomic rename. Existing entries are left unchanged.
+
 ## Python client example
 
 The Python client can be installed with `pip install 'git+https://github.com/LLVMParty/smt-server.git#subdirectory=python'` or used directly by adding `python/` to `PYTHONPATH`.

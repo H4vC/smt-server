@@ -102,6 +102,8 @@ The server has explicit bounds for hostile or accidental large inputs:
 - optional read/write timeouts;
 - per-request backend budgets.
 
+The server also records handled binary request/response pairs under `~/.smt-server/requests` by default. `SMT_SERVER_RECORD_DIR` overrides the directory; setting it to an empty value disables recording. Entries are keyed by the BLAKE3 hash of the canonical request, split as `ab/cd/<hash>.req.bin` and `ab/cd/<hash>.res.bin`. SMT-LIB text requests are recorded after lowering to binary wire requests. The recorder zeroes request/response IDs before hashing or storage, writes through temporary files, and leaves existing entries unchanged.
+
 The client libraries also enforce sort/width/context checks during construction so malformed requests are normally caught before serialization.
 
 ## Scope and non-goals
