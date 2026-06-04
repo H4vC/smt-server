@@ -59,34 +59,39 @@ Payload formats:
 
 ## Request recording
 
-The server records every handled binary request/response pair to a local corpus for replay and regression testing. SMT-LIB requests are recorded after successful lowering to the same binary wire request used by binary clients.
+The server records every handled binary request/response pair to a local SQLite corpus for replay and regression testing. SMT-LIB requests are recorded after successful lowering to the same binary wire request used by binary clients.
 
-Default location:
-
-```text
-~/.smt-server/requests
-```
-
-Override the directory with `SMT_SERVER_RECORD_DIR`:
-
-```sh
-SMT_SERVER_RECORD_DIR=/tmp/smt-corpus cargo run -p smt-server -- 127.0.0.1:9123
-```
-
-Set `SMT_SERVER_RECORD_DIR` to an empty value to disable recording:
-
-```sh
-SMT_SERVER_RECORD_DIR= cargo run -p smt-server -- 127.0.0.1:9123
-```
-
-Files are deduplicated by the BLAKE3 hash of the canonical binary request, with request and response `request_id` fields zeroed so equivalent requests share one entry:
+Default database:
 
 ```text
-~/.smt-server/requests/ab/cd/<hash>.req.bin
-~/.smt-server/requests/ab/cd/<hash>.res.bin
+~/.smt-server/recordings.db
 ```
 
-Writes use temporary files and atomic rename. Existing entries are left unchanged.
+Override the database with `SMT_SERVER_RECORD_DB`:
+
+```sh
+SMT_SERVER_RECORD_DB=/tmp/smt-recordings.db cargo run -p smt-server -- 127.0.0.1:9123
+```
+
+Set `SMT_SERVER_RECORD_DB` to an empty value to disable recording:
+
+```sh
+SMT_SERVER_RECORD_DB= cargo run -p smt-server -- 127.0.0.1:9123
+```
+
+Rows are deduplicated by the BLAKE3 hash of the canonical binary request, with request and response `request_id` fields zeroed so equivalent requests share one entry. Existing rows are left unchanged.
+
+To import the old file-tree corpus from `~/.smt-server/requests` into the SQLite database:
+
+```sh
+cargo run -p smt-server -- migrate-recordings
+```
+
+Custom migration paths are supported:
+
+```sh
+cargo run -p smt-server -- migrate-recordings /path/to/requests /tmp/smt-recordings.db
+```
 
 ## Python client example
 

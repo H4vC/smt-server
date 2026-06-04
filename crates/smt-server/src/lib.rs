@@ -27,6 +27,11 @@ pub use pool::PooledBackend;
 pub use protocol::{handle_binary_frame, handle_binary_request, response_from_query_result};
 pub use qfbvsmtrs_backend::QfbvsmtrsBackend;
 pub use racing::RacingBackend;
+pub use recording::{
+    default_legacy_recording_tree, default_recording_db_path,
+    migrate_default as migrate_recordings, migrate_tree as migrate_recording_tree,
+    recording_db_path, MigrationReport,
+};
 pub use rumba_backend::RumbaBackend;
 pub use server::{dispatch_payload, dispatch_payload_with_cache, serve_tcp, ServerConfig};
 pub use smt2::{request_to_smt2, Smt2Script, Smt2Variable};

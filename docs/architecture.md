@@ -102,7 +102,9 @@ The server has explicit bounds for hostile or accidental large inputs:
 - optional read/write timeouts;
 - per-request backend budgets.
 
-The server also records handled binary request/response pairs under `~/.smt-server/requests` by default. `SMT_SERVER_RECORD_DIR` overrides the directory; setting it to an empty value disables recording. Entries are keyed by the BLAKE3 hash of the canonical request, split as `ab/cd/<hash>.req.bin` and `ab/cd/<hash>.res.bin`. SMT-LIB text requests are recorded after lowering to binary wire requests. The recorder zeroes request/response IDs before hashing or storage, writes through temporary files, and leaves existing entries unchanged.
+The server also records handled binary request/response pairs into a SQLite database at `~/.smt-server/recordings.db` by default. `SMT_SERVER_RECORD_DB` overrides the path; setting it to an empty value disables recording. Each row is keyed by the BLAKE3 hash of the canonical request (`INSERT OR IGNORE` dedupes, leaving existing rows unchanged), and stores the canonical request and response blobs. SMT-LIB text requests are recorded after lowering to binary wire requests. The recorder zeroes request/response IDs before hashing or storage.
+
+Recording is synchronous: the server attempts the SQLite insert before returning the response from the dispatcher. The database opens in WAL mode with `synchronous=NORMAL` and a busy timeout, so multiple server instances on the same host can write to the same file (writes serialize; readers don't block). WAL relies on local filesystem locking and is not safe over network mounts. The one-time importer reads the legacy `~/.smt-server/requests` file tree: run `smt-server migrate-recordings [SOURCE_DIR] [DB_PATH]` to fold an existing tree into the database.
 
 The client libraries also enforce sort/width/context checks during construction so malformed requests are normally caught before serialization.
 

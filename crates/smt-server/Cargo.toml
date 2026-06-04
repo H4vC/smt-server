@@ -12,6 +12,7 @@ rumba-core = { git = "https://github.com/thalium/rumba", rev = "2a7a38963f9894cd
 smt-qfbv-smtlib = { path = "../smt-qfbv-smtlib" }
 smt-wire = { path = "../smt-wire" }
 blake3 = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 z3 = { version = "0.20.0", features = ["gh-release"] }
 
 [dev-dependencies]
