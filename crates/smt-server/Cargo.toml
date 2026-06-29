@@ -17,3 +17,9 @@ z3 = { version = "0.20.0", features = ["gh-release"] }
 
 [dev-dependencies]
 rumba-core = { git = "https://github.com/thalium/rumba", rev = "2a7a38963f9894cdda24ea93b5f278752aff7a2e", features = ["parse"] }
+
+[features]
+bitwuzla = ["dep:pkg-config"]
+
+[build-dependencies]
+pkg-config = { version = "0.3", optional = true }
