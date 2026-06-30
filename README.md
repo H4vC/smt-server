@@ -14,7 +14,7 @@ It targets binary analysis, lifting, symbolic execution, and IR experiments wher
 
 - Solve and optimize: [`z3`](https://docs.rs/z3/latest/z3/), [`binbit`](https://github.com/bint-disasm/binbit), and the standalone `qfbvsmtrs` crate.
 - Simplify: [Rumba](https://github.com/thalium/rumba) for supported 64-bit-or-smaller MBA expression islands.
-- Bitwuzla (optional, `--features bitwuzla`): fetches a prebuilt static [Bitwuzla](https://bitwuzla.github.io/) archive and joins the solver racer when enabled (Linux x86_64/aarch64, macOS arm64, Windows x86_64 `msvc` and `gnu` targets).
+- Bitwuzla: fetches a prebuilt static [Bitwuzla](https://bitwuzla.github.io/) archive at build time and joins the solver racer (Linux x86_64/aarch64, macOS arm64, Windows x86_64 `msvc` and `gnu` targets).
 - Text compatibility: SMT-LIB `QF_BV` scripts are parsed into the same binary IR used by binary clients.
 
 The binary protocol is the main API. SMT-LIB support exists for tooling compatibility and test reuse.
@@ -38,18 +38,12 @@ Scope is limited to quantifier-free bit-vectors and Booleans. That covers the fo
 cargo build --workspace
 ```
 
-The optional Bitwuzla backend fetches a prebuilt static archive at build time (no source build needed):
+The Bitwuzla backend fetches a prebuilt static archive at build time (no source build needed). Linux/macOS resolve GMP/MPFR via pkg-config; Windows MSVC fetches a self-contained archive with GMP/MPFR statically linked in (no extra install):
 
 ```sh
 # Linux: apt install libgmp-dev libmpfr-dev pkg-config
 # macOS: brew install gmp mpfr pkg-config
-cargo build -p smt-server --features bitwuzla
-```
-
-Linux/macOS pull the upstream Bitwuzla 0.9.1 release and resolve GMP/MPFR via pkg-config. On Windows the default `x86_64-pc-windows-msvc` target fetches a self-contained MSVC archive (GMP/MPFR statically linked in, no extra install):
-
-```sh
-cargo build -p smt-server --features bitwuzla
+cargo build -p smt-server
 ```
 
 The `x86_64-pc-windows-gnu` target is also supported via the upstream MinGW prebuilt:
@@ -57,7 +51,7 @@ The `x86_64-pc-windows-gnu` target is also supported via the upstream MinGW preb
 ```sh
 rustup target add x86_64-pc-windows-gnu
 # MSYS2: pacman -S mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr mingw-w64-x86_64-pkgconf
-cargo build -p smt-server --features bitwuzla --target x86_64-pc-windows-gnu
+cargo build -p smt-server --target x86_64-pc-windows-gnu
 ```
 
 ## Run the server

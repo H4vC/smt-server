@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "bitwuzla")]
 use smt_server::BitwuzlaBackend;
 use smt_server::{
     default_legacy_recording_tree, migrate_recording_tree, recording_db_path, serve_tcp, Backend,
@@ -17,23 +16,16 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
     let addr = arg.unwrap_or_else(|| "127.0.0.1:9123".to_owned());
-    #[cfg_attr(not(feature = "bitwuzla"), allow(unused_mut))]
     let mut racers: Vec<Arc<dyn Backend>> = vec![
         Arc::new(Z3Backend),
         Arc::new(BinbitBackend),
         Arc::new(QfbvsmtrsBackend),
     ];
-    #[cfg(feature = "bitwuzla")]
     racers.push(Arc::new(BitwuzlaBackend));
     let solver = Arc::new(RacingBackend::new(racers).with_default_budget_ms(30_000));
     let backend = Arc::new(CommandRouterBackend::new(Arc::new(RumbaBackend), solver));
     eprintln!(
-        "smt-server listening on {addr} with rumba simplifier + racing solver (z3 crate + binbit + qfbvsmtrs{})",
-        if cfg!(feature = "bitwuzla") {
-            " + bitwuzla"
-        } else {
-            ""
-        }
+        "smt-server listening on {addr} with rumba simplifier + racing solver (z3 crate + binbit + qfbvsmtrs + bitwuzla)"
     );
     serve_tcp(addr, ServerConfig::new(backend))
 }

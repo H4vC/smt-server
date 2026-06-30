@@ -1,8 +1,6 @@
-#![cfg(feature = "bitwuzla")]
 //! Backend-level tests for [`BitwuzlaBackend`] in isolation (no racing),
 //! exercising translate, solve, model extraction, named-unsat-core, and
-//! bit-hunt optimize. Gated behind the `bitwuzla` feature (off by default); CI
-//! runs these on Linux, macOS, and Windows MSVC.
+//! bit-hunt optimize. CI runs these on Linux, macOS, and Windows MSVC.
 
 use smt_server::{Backend, BitwuzlaBackend, QueryStatus};
 use smt_wire::raw::{BinaryRequest, ExprBuilder};

@@ -9,7 +9,6 @@
 // MinGW. Release layouts vary, so we search the extracted tree for
 // `libbitwuzla.a`.
 
-#[cfg(feature = "bitwuzla")]
 fn main() {
     if let Err(err) = bitwuzla::link() {
         eprintln!("error: {err}");
@@ -17,10 +16,6 @@ fn main() {
     }
 }
 
-#[cfg(not(feature = "bitwuzla"))]
-fn main() {}
-
-#[cfg(feature = "bitwuzla")]
 mod bitwuzla {
     use std::env;
     use std::fmt::Write as _;

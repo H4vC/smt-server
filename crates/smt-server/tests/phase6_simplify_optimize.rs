@@ -167,7 +167,6 @@ fn z3_backend_optimization_uses_bit_hunt() {
     assert_eq!(optimum.optimum.bytes, vec![5]);
 }
 
-#[cfg(feature = "bitwuzla")]
 #[test]
 fn bitwuzla_backend_optimization_uses_bit_hunt() {
     let mut builder = ExprBuilder::new();

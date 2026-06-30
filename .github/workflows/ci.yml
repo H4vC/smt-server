@@ -36,6 +36,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.os }}-stable
+      - name: Install GMP and MPFR (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
+      - name: Install GMP and MPFR (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install gmp mpfr pkg-config
+          # brew's gmp/mpfr .pc files are not on the default search path.
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test
@@ -115,39 +126,3 @@ jobs:
                       proc.kill()
                       proc.wait(timeout=5)
           PY
-
-  bitwuzla:
-    name: Bitwuzla backend (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bitwuzla-${{ matrix.os }}-stable
-      - name: Install GMP and MPFR (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
-      - name: Install GMP and MPFR (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install gmp mpfr pkg-config
-          # brew's gmp/mpfr .pc files are not on the default search path.
-          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
-      # build.rs fetches the prebuilt Bitwuzla 0.9.1 static archive from GitHub
-      # at build time. Linux/macOS resolve GMP/MPFR via pkg-config (installed
-      # above); Windows MSVC fetches a self-contained archive with GMP/MPFR
-      # statically linked in, so no extra install is needed there.
-      - name: Clippy
-        run: cargo clippy -p smt-server --features bitwuzla --all-targets -- -D warnings
-      - name: Test
-        run: cargo test -p smt-server --features bitwuzla
